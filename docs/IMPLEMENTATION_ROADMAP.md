@@ -5,7 +5,7 @@ not verified working and tested. Every phase ends with: tests executed, docs upd
 `docs/PROGRESS.md` appended, and the full validation gate
 (`next typegen` → `tsc --noEmit` → `next build` → platform `build_and_start`) passing.
 
-**Current pointer:** Phases 0–5 ✅ complete · Phase 6 core done (portal automation pending) → **Phase 7 next**.
+**Current pointer:** Phases 0–6 ✅ complete (AC-025 environment-limited) · **Phase 7 implemented** — accounting/sales/inventory/tax reports + RL-1…RL-5 integrity banner, CSV export, role-aware dashboard; residuals listed in `PROGRESS.md` Session 9 → **Phase 8 next**.
 
 ---
 

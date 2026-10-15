@@ -72,7 +72,7 @@ const NAV_SECTIONS: { label: (t: Dict) => string; items: NavItem[] }[] = [
   {
     label: (t) => t.nav.sectionAdmin,
     items: [
-      { href: "/reports", icon: BarChart3, label: (t) => t.nav.reports, perm: "reports.view", enabled: false },
+      { href: "/reports", icon: BarChart3, label: (t) => t.nav.reports, perm: "reports.view", enabled: true },
       { href: "/settlement", icon: Scale, label: (t) => t.rep.rqTitle, perm: "settlement.review", enabled: true },
       { href: "/tax", icon: Receipt, label: (t) => t.nav.tax, perm: "tax.view", enabled: false },
       { href: "/hr", icon: Users, label: (t) => t.nav.hr, perm: "hr.employees.manage", enabled: false },

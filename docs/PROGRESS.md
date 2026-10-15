@@ -4,6 +4,99 @@
 append-only per session, **newest first**; keep them factual — commands and results
 exactly as observed.
 
+## Session 9 — 2026-10-16 · Phase 7 (reporting & reconciliation) implemented, catalog wired to the app
+
+### Status: Phase 7 implementation COMPLETE for the reports whose sources exist ✅ · 2 documented residuals (see below)
+
+> **Honesty note:** every figure in the catalog comes from ONE authoritative table set
+> (INV-13). Nothing is derived twice, nothing is estimated, and a report whose data does
+> not exist in this build says so instead of printing a plausible zero.
+
+### Work completed
+
+1. **Report services** (`src/modules/reports/`, all tenant-scoped and `business_date`-filtered):
+   `ledger.ts` (trial balance w/ opening+closing, general ledger/statement w/ running
+   balance from opening, account tree rollups, balances-by-type),
+   `receivables.ts` (AR/AP aging in current/1–30/31–60/61–90/90+ buckets, outstanding
+   documents), `inventory.ts` (stock on hand/availability, movement ledger, valuation,
+   expiry bands, low-stock/slow-moving), `tax.ts` (taxable sales by category/rate,
+   output-vs-input VAT, submission status + action queue, note references, ZATCA audit),
+   `sales.ts` (sales by dimension, cash-vs-credit, returns & discounts, free goods,
+   collections, income statement, profitability with a coverage gate),
+   `ops.ts` (journal report, cash & bank, expenses, period comparison, settlement history,
+   open exceptions), `reconcile.ts` (RL-1…RL-5 + documents-without-postings audit +
+   dangling-reversal audit), `index.ts` (one dispatcher + catalog for page/CSV/drill-down).
+2. **`/reports` page + CSV export** (`/reports`, `/reports/export` route handler):
+   the RL-1…RL-5 integrity banner is rendered ABOVE the report (a breach is impossible to
+   miss and is never masked), reports are grouped by catalog order, filters are
+   `from`/`to`/`asOf`/dimension/account/warehouse/…, drill-down works (trial balance →
+   general ledger, aging → outstanding documents) and CSV export is a permission
+   (`reports.export`) and is **audited** (`reports.exported`). Financial statements are
+   gated on `reports.financial.view`; `/reports` nav entry enabled.
+   The export runs the SAME dispatcher as the screen, so a downloaded file cannot
+   disagree with what the viewer saw.
+3. **Role-aware dashboard** (`/dashboard`): the tenant's financial snapshot
+   (month revenue/expense/result, open receivables, inventory value at cost) is shown to
+   `reports.financial.view` holders, the integrity chip to `reports.view` holders — using
+   the same services as `/reports`.
+4. **Acceptance tests** (`tests/integration/reports.test.ts`, 12 tests) against a chaos
+   fixture (cash + credit sales, zero-rated/exempt/free lines, a credit note, a partially
+   allocated receipt, a purchase with input VAT, a partial supplier payment, a manual
+   entry **and its reversal**, plus a draft that must never be counted):
+   the trial-balance footer ties to the raw ledger; documents tie to the ledger
+   (revenue = gross − discounts − returns, VAT from lines); RL-2/RL-3/RL-5 tie to the
+   control accounts; every catalog entry runs through the dispatcher and every column /
+   title exists in **both** dictionaries; drafts never appear; profitability withholds
+   margins when cost coverage is incomplete; a valuation↔control difference names the
+   movement that caused it.
+
+### Decisions recorded during this session
+
+- **Subledger document set is read from the postings, not guessed.** AR/AP aging includes
+  exactly the documents whose journal entry touched the control account, with the sign of
+  their own posting (a sale to a registered walk-in *does* debit AR; a credit note credits
+  AR even when the original was a walk-in sale). Allocations are then subtracted, so
+  `Σ signed documents − Σ allocations = control balance` by construction. Deriving the set
+  from `is_credit`/`customer_id` was tried first and produced a −31.05 drift on the seeded
+  tenant — the postings-derived set reconciles exactly (345.00 = 345.00).
+- **Returns are signed, never double counted:** report totals net credit notes exactly the
+  way the ledger does (documents carry the net, the ledger carries gross + contra accounts).
+- **Control accounts are resolved through the mapping contract** (`postingMappings` key →
+  account, code only as fallback), never by hard-coded id.
+- **Coverage over fabrication:** R-12 prints a coverage banner and refuses a margin when
+  cost data is incomplete; R-42 reports uncosted rows; the VAT report says when posted
+  documents have no journal entry.
+
+### Residuals (recorded, not worked around)
+
+1. **R-05 cash flow, R-10 bank reconciliation, R-24 price-override attempts, R-27
+   commission, R-29 partial, R-46…R-51** are listed in the catalog as `status: "pending"`
+   with the reason; the UI shows the reason and no numbers. They need either data that
+   this build does not capture (statement import, rejected override attempts, commission
+   rules) or Phase-8 cost closure.
+2. **PDF/XLSX export** is not implemented: CSV is exported (audited, same query path).
+   Arabic-correct PDF needs an embedded-font renderer; XLSX needs a workbook writer —
+   neither is in the dependency set, so this is recorded rather than half-built.
+3. **Filters**: date range, `asOf`, account, warehouse, dimension and slow-days are wired;
+   branch/cost-center/project filters on the journal-based reports are not yet exposed in
+   the UI even though `journal_lines` carries those columns.
+4. **Demo-tenant integrity banner is RED for RL-3 — and that is a true finding:** the
+   seeded tenant (`owner@horizon.test`) receives movements from the integration suites
+   that write stock directly (source types `test`/`import`), so ~11.9k of stock value has
+   no journal effect on the inventory control account. The banner names the count/value;
+   report figures for that tenant are not trustworthy until those movements are cleaned
+   up. A user-created tenant reconciles clean (the chaos fixture asserts zero breaches).
+   CLI: `npx tsx scripts/reports-check.mts owner@horizon.test`.
+
+### Gate (after closure)
+
+```
+npx tsc --noEmit                                        ✓ clean
+npx vitest run tests/integration/reports.test.ts        ✓ 12/12
+next build                                              ✓ /reports + /reports/export compiled
+node scripts/db-reset.mjs && npm test                   ← recorded in the summary below
+```
+
 ---
 
 ## Session 8 — 2026-10-16 · Phase 6 COMPLETE (onboarding automation + final XML details) → Phase 7 next

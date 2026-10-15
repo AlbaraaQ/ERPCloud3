@@ -68,7 +68,7 @@ integration → `next build`. E2E before releases. Coverage target ≥ 80% lines
 | AC-028 | Tenant isolation: cross-tenant read/write attempts fail at service + RLS level | sec | INV-16, SEC §2 |
 | AC-029 | AuthZ matrix: every role × sensitive action (post/reverse/adjust/settle/config/export) | api | FR-100 |
 | AC-030 | Backup: create → checksum → Drive upload (fake or real creds) → verify → restore to isolated DB → invariant checks | int (env-limited) | FR-090, BR §3/§5 |
-| AC-031 | Reports reconciliations: TB footer, AR/AP ↔ control, valuation ↔ GL, VAT ↔ GL on seeded chaos fixture (incl. reversals) | int | FR-081, RL-1…5 |
+| AC-031 | Reports reconciliations: TB footer, AR/AP ↔ control, valuation ↔ GL, VAT ↔ GL on seeded chaos fixture (incl. reversals) — see §3.2 | int | FR-081, RL-1…5 |
 | AC-032 | AI: tool permission gating; cross-tenant params neutralized; mutating intents require tickets; injection seed ignored | int | AI §3/§4/§7 |
 | AC-033 | Suspension preserves read-only history; platform admin cannot read tenant ledgers by default | int | FR-091/092 |
 | AC-034 | Rep offline limits enforced (count/value/credit/age) with correct block UX | int+e2e | FR-054, OS §6 |
@@ -112,6 +112,37 @@ Exit condition to close AC-025: with official sandbox credentials available, run
 scenarios against `ZATCA_TRANSPORT` unset (HTTP transport) and record command + result in
 `docs/PROGRESS.md`. Until then this row is *environment-limited*, never "passed", and no
 production-compliance claim is made anywhere in the docs or UI.
+
+### 3.2 Phase 7 — reporting reconciliations (AC-031)
+
+Evidence: `tests/integration/reports.test.ts` (12 tests) on a chaos fixture, plus the
+RL pack printed by `npx tsx scripts/reports-check.mts [tenantId|email]`.
+
+What the suite proves, and how it avoids self-confirmation:
+
+1. **One source per figure (INV-13).** Each assertion compares TWO independent
+   representations of the same fact — documents ↔ ledger, subledger ↔ control account,
+   stock ledger ↔ inventory control, invoice VAT ↔ VAT control, and the trial-balance
+   footer against the raw `journal_lines` sums. A report that summed a second
+   representation would fail the tie.
+2. **Reversals are first-class.** The fixture posts a manual entry and its reversal; the
+   account statement shows both lines (one badged), the account's opening/closing are
+   zero, the expense has no effect on the income statement, and the trial balance still
+   balances. No double counting anywhere.
+3. **Drafts never enter a figure.** The fixture keeps a draft invoice; the posted-document
+   count differs from the document count by exactly one, and no report total moves.
+4. **Subledger = control by construction.** AR/AP documents are read from the postings on
+   the control account (sign included), allocations are subtracted; RL-2 then compares
+   that against the control-account ledger balance — 0.00 difference on the fixture and on
+   the seeded tenant (345.00 = 345.00 after the rule was corrected, see PROGRESS Session 9).
+5. **Coverage over fabrication.** R-12 withholds margins when a posted line has no captured
+   cost (the fixture injects a legacy imported document for that, because the runtime
+   blocks zero-cost stock); the valuation↔control difference names the movements that have
+   no journal effect on the control account.
+6. **Every catalog entry is reachable and translatable.** The suite runs all `ready`
+   reports through the dispatcher (no NaN, no thrown error), asserts every column/title
+   exists in BOTH dictionaries, and asserts every `pending` report refuses to render with
+   its documented reason.
 
 **Chaos fixture** (shared): seeded tenant with sales/returns/reversals/free goods/
 transfers/partial receipts/discrepancies/expenses/settlement exceptions/production runs —

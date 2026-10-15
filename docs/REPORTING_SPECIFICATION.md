@@ -10,6 +10,25 @@ Every report below states: **sources**, **formula**, **filters**, **draft policy
 - Drafts are **excluded** by default; a visible "include drafts" toggle (where offered) labels output accordingly.
 - Reversals: reversal entries are first-class rows; P&L-style reports naturally net them; document lists show both with a "عكسي/Reversed" badge. Voided-before-post docs appear only in audit-style listings.
 - Exports: PDF (Arabic-correct rendering) + XLSX; export events audited; drill-down links only where the viewer has document-level permission.
+- **Subledger documents are read from the postings, never guessed (Phase 7, binding).** The
+  AR/AP document set is exactly the set of `journal_entries.source_id` whose **posted lines
+  touched the resolved control account** (`postingMappings` key → account, code only as a
+  fallback — never a hard-coded id), with each document's sign taken from **its own
+  posting** (debit-heavy ⇒ it increased the subledger). Allocations are then subtracted, so
+  `Σ signed documents − Σ allocations = control-account balance` holds **by construction**
+  (RL-2). Deriving the set from `is_credit`/`customer_id`/`invoice_type` alone was tried and
+  drifts whenever a walk-in sale debits AR or a credit note reverses one — do not go back.
+- **Maturity/aging of undated documents:** a document with no `due_date` is shown in the
+  `current` bucket and the report carries a note with the count, so the reader knows the
+  bucket is a convention and not data.
+- **A breach must explain itself.** Every failed RL assertion carries a note naming the
+  responsible records (e.g. stock movements with **no journal effect on the inventory
+  control account**, posted documents with VAT and no journal entry), including the key
+  figures — never a bare delta. Diagnostics run only when a check actually fails.
+- **Coverage over fabrication.** When the data a figure needs does not exist (missing cost,
+  no statement import, no captured override attempt), the report prints a coverage banner
+  and withholds the derived percentage instead of emitting a plausible number; catalog
+  entries whose sources are absent are `pending` with a stated reason and render no numbers.
 
 ## 1. Accounting reports
 
