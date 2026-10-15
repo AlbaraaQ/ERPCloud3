@@ -95,12 +95,11 @@ export const PERMISSIONS: readonly PermissionDef[] = [
   p("settings.users.manage", "settings", "إدارة المستخدمين", "Manage users"),
   p("settings.roles.manage", "settings", "إدارة الأدوار والصلاحيات", "Manage roles"),
   p("settings.company.manage", "settings", "إعدادات المنشأة", "Manage company settings"),
-
-  // Platform (console only — granted to platform_users, never tenant roles)
-  p("platform.tenants.manage", "platform", "إدارة المستأجرين", "Manage tenants"),
-  p("platform.backups.manage", "platform", "إدارة النسخ الاحتياطي", "Manage backups"),
-  p("platform.support.grant", "platform", "منح وصول دعم", "Grant support access"),
 ] as const;
+// NOTE (Phase 8): platform permissions are NOT part of this catalog. They live in
+// `src/modules/platform/permissions.ts` and are granted to `platform_users` only —
+// keeping them out of the tenant catalog makes "no tenant role can grant platform
+// access" a structural property instead of a filter that somebody must remember.
 
 export type PermissionCode = (typeof PERMISSIONS)[number]["code"];
 

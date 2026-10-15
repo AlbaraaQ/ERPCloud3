@@ -255,7 +255,7 @@ export async function confirmTotpEnrollment(input: {
   code: string;
   actorLabel: string;
   ip?: string | null;
-}): Promise<{ ok: boolean; errorKey?: string }> {
+}): Promise<{ ok: boolean; errorKey?: string; platformUserId?: string }> {
   const pending = readPending(input.pendingToken, "2fa-enroll");
   if (!pending || !pending.payload) return { ok: false, errorKey: "errors.platformTotpEnrollExpired" };
   const secret = pending.payload;
@@ -274,7 +274,7 @@ export async function confirmTotpEnrollment(input: {
     entityId: pending.platformUserId,
     ip: input.ip ?? null,
   });
-  return { ok: true };
+  return { ok: true, platformUserId: pending.platformUserId };
 }
 
 /** Replace an enrolled secret (same pending-token flow, owner-initiated). */

@@ -560,6 +560,32 @@ begin
 end $$;
 
 -- Platform audit chain (PLATFORM_ADMIN §3) — append-only, per-platform chain.
+--
+-- The row's own `at` value is what goes into the hash, and it is inserted
+-- explicitly: an externally verifiable chain must be recomputable from the
+-- stored row alone (a `clock_timestamp()` that is never stored would make the
+-- hash unverifiable).
+create or replace function public.platform_audit_hash(
+  p_prev text,
+  p_actor_label text,
+  p_action text,
+  p_entity text,
+  p_entity_id text,
+  p_after jsonb,
+  p_at timestamptz
+) returns text
+language sql immutable
+as $$
+  select encode(digest(
+    coalesce(p_prev, '') || '|' ||
+    coalesce(p_actor_label, '') || '|' || p_action || '|' ||
+    coalesce(p_entity, '') || '|' || coalesce(p_entity_id, '') || '|' ||
+    coalesce(p_after::text, '') || '|' ||
+    to_char(p_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+    'sha256'
+  ), 'hex')
+$$;
+
 create or replace function public.write_platform_audit(
   p_id uuid,
   p_actor_platform_user_id uuid,
@@ -578,6 +604,7 @@ as $$
 declare
   v_prev text;
   v_hash text;
+  v_at timestamptz := clock_timestamp();
 begin
   perform pg_advisory_xact_lock(hashtextextended('platform_audit', 0));
 
@@ -586,24 +613,70 @@ begin
   order by a.at desc, a.id desc
   limit 1;
 
-  v_hash := encode(digest(
-    coalesce(v_prev, '') || '|' ||
-    coalesce(p_actor_label, '') || '|' || p_action || '|' ||
-    coalesce(p_entity, '') || '|' || coalesce(p_entity_id, '') || '|' ||
-    coalesce(p_after::text, '') || '|' || clock_timestamp()::text,
-    'sha256'
-  ), 'hex');
+  v_hash := public.platform_audit_hash(v_prev, p_actor_label, p_action, p_entity, p_entity_id, p_after, v_at);
 
   insert into public.platform_audit_log (
     id, actor_platform_user_id, actor_label, action, entity, entity_id,
-    "before", "after", ip, user_agent, prev_hash, hash
+    "before", "after", ip, user_agent, at, prev_hash, hash
   ) values (
     p_id, p_actor_platform_user_id, p_actor_label, p_action, p_entity, p_entity_id,
-    p_before, p_after, p_ip, p_user_agent, v_prev, v_hash
+    p_before, p_after, p_ip, p_user_agent, v_at, v_prev, v_hash
   );
 
   return p_id;
 end;
 $$;
 
+-- Recompute the chain from the stored rows. Broken link ⇒ the first offending
+-- row is reported with the reason; a chain that cannot be verified is an
+-- incident, not a warning.
+create or replace function public.verify_platform_audit_chain(p_limit integer default 1000)
+returns table (ok boolean, checked integer, broken_id uuid, broken_at timestamptz, detail text)
+language plpgsql stable security definer
+set search_path = public
+as $$
+declare
+  r record;
+  v_prev text := null;
+  v_expected text;
+  v_checked integer := 0;
+begin
+  for r in
+    select a.id, a.actor_label, a.action, a.entity, a.entity_id, a."after", a.at, a.prev_hash, a.hash
+    from public.platform_audit_log a
+    order by a.at asc, a.id asc
+    limit p_limit
+  loop
+    v_checked := v_checked + 1;
+    if v_prev is not null and r.prev_hash is distinct from v_prev then
+      return query select false, v_checked, r.id, r.at, 'prev_hash does not match the previous row''s hash'::text;
+      return;
+    end if;
+    v_expected := public.platform_audit_hash(r.prev_hash, r.actor_label, r.action, r.entity, r.entity_id, r."after", r.at);
+    if v_expected is distinct from r.hash then
+      return query select false, v_checked, r.id, r.at, 'row hash does not match its contents'::text;
+      return;
+    end if;
+    v_prev := r.hash;
+  end loop;
+  return query select true, v_checked, null::uuid, null::timestamptz, null::text;
+end;
+$$;
+
 revoke update, delete on public.platform_audit_log from public;
+
+-- Append-only enforcement: the SECURITY DEFINER function is the only writer.
+create or replace function public.platform_audit_append_only()
+returns trigger language plpgsql as $$
+begin
+  raise exception 'platform_audit_log is append-only (attempted %)', tg_op using errcode = 'restrict_violation';
+end $$;
+
+drop trigger if exists platform_audit_no_update on public.platform_audit_log;
+create trigger platform_audit_no_update
+  before update or delete on public.platform_audit_log
+  for each row execute function public.platform_audit_append_only();
+
+-- Platform tables hold operator metadata, never tenant books; the app role
+-- reaches them through the same owner connection, so no tenant policy applies.
+revoke all on function public.platform_audit_append_only() from public;

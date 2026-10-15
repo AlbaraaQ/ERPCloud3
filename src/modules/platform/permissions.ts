@@ -66,4 +66,10 @@ export const GRANTABLE_SCREENS = [
   "settlement",
   "tax",
   "reports",
+  /**
+   * Not a screen: the whole-tenant export bundle. Producing one is a read of the
+   * entire tenant, so it needs its own entry in the grant scope and the explicit
+   * `exports: true` flag.
+   */
+  "export",
 ] as const;

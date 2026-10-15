@@ -104,17 +104,16 @@ export async function buildContextByToken(token: string): Promise<SessionContext
       .catch((e) => logger.warn({ err: e }, "session touch failed"));
   }
 
+  // A platform session is NOT a tenant session: the console resolves it through
+  // `buildPlatformContext`, so this resolver refuses it outright (session isolation,
+  // PLATFORM_ADMIN §6.5). One sessions table, two disjoint resolvers.
+  if (row.platformUserId || !row.userId || !row.tenantId) return null;
+
   const base = {
     session: { id: row.id, expiresAt: row.expiresAt, ip: row.ip, userAgent: row.userAgent },
     userId: row.userId,
-    platformUserId: row.platformUserId,
+    platformUserId: null,
   };
-
-  // Platform session (console) — resolved without tenant binding (Phase 8 uses it).
-  if (row.platformUserId && !row.userId) {
-    return { ...base, userName: "", userEmail: "", tenant: null, roles: [], permissions: new Set() };
-  }
-  if (!row.userId || !row.tenantId) return null;
 
   return withTenant(row.tenantId, async (trx) => {
     const [user] = await trx

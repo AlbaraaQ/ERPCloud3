@@ -65,3 +65,33 @@ export async function writePlatformAudit(exec: Executor, input: PlatformAuditInp
     });
   }
 }
+
+export interface ChainVerification {
+  ok: boolean;
+  checked: number;
+  brokenId?: string | null;
+  brokenAt?: Date | null;
+  detail?: string | null;
+}
+
+/**
+ * Recompute the platform audit chain from the stored rows (same expressions as
+ * the writer, in the database, so jsonb/timestamp rendering can never drift).
+ * A broken link is reported with the offending row — never silently ignored.
+ */
+export async function verifyAuditChain(limit = 1000): Promise<ChainVerification> {
+  const res = (await db.execute(
+    sql`select ok, checked, broken_id, broken_at, detail from public.verify_platform_audit_chain(${limit})`,
+  )) as unknown as {
+    rows: { ok: boolean; checked: number; broken_id: string | null; broken_at: Date | null; detail: string | null }[];
+  };
+  const row = res.rows[0];
+  if (!row) return { ok: false, checked: 0, detail: "chain verification returned no row" };
+  return {
+    ok: Boolean(row.ok),
+    checked: Number(row.checked),
+    brokenId: row.broken_id,
+    brokenAt: row.broken_at,
+    detail: row.detail,
+  };
+}

@@ -13,7 +13,8 @@
     "backup:verify": "tsx scripts/platform-backup.mts verify",
     "backup:drill": "tsx scripts/platform-backup.mts drill",
     "backup:prune": "tsx scripts/platform-backup.mts prune",
-    "backup:list": "tsx scripts/platform-backup.mts list"
+    "backup:list": "tsx scripts/platform-backup.mts list",
+    "backup:status": "tsx scripts/platform-backup.mts status"
   },
   "dependencies": {
     "@fontsource/ibm-plex-sans-arabic": "^5.3.0",

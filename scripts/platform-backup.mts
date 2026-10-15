@@ -1,101 +1,144 @@
 /**
- * Platform backup CLI (ops tool + the sandbox's job runner).
+ * Backup/restore operator script (BACKUP_AND_RECOVERY §3/§5/§6).
  *
- *   npx tsx scripts/platform-backup.mts run [--no-remote] [--only t1,t2]
- *   npx tsx scripts/platform-backup.mts list
- *   npx tsx scripts/platform-backup.mts verify <runId>
+ * The worker schedules these operations in a normal deployment; here (and in any
+ * environment without LISTEN/NOTIFY) they run on demand so the same code path can
+ * be exercised and its evidence inspected:
+ *
+ *   npx tsx scripts/platform-backup.mts run [--no-remote] [--format=logical-json]
+ *   npx tsx scripts/platform-backup.mts verify <runId|latest>
  *   npx tsx scripts/platform-backup.mts drill [runId] [--keep]
  *   npx tsx scripts/platform-backup.mts prune
- *   npx tsx scripts/platform-backup.mts freshness
- *
- * The dev sandbox has no pg-boss schedule (ENABLE_WORKER=false in .env), so this
- * is how the 4-hourly job is invoked by hand here; in production the same
- * functions run from the `backup` queue in src/modules/jobs/worker.ts.
+ *   npx tsx scripts/platform-backup.mts status
  */
 
 import "dotenv/config";
-import {
-  artifactInventory,
-  backupFreshness,
-  listBackupRuns,
-  pruneBackups,
-  runBackup,
-  runRestoreDrill,
-  verifyBackup,
-} from "@/modules/platform/backup/service";
+import { runBackup, verifyBackup, runRestoreDrill, pruneBackups, backupFreshness, listBackupRuns, remoteProviderStatus } from "@/modules/platform/backup/service";
+import { sql } from "drizzle-orm";
+import { db, pool } from "@/db";
 
-const [command, ...rest] = process.argv.slice(2);
-const flags = new Set(rest.filter((r) => r.startsWith("--")));
-const args = rest.filter((r) => !r.startsWith("--"));
-const onlyArg = rest.find((r) => r.startsWith("--only"));
-const only = onlyArg ? onlyArg.split("=")[1]?.split(",").filter(Boolean) : undefined;
+const [command = "status", ...rest] = process.argv.slice(2);
+const flags = new Set(rest.filter((a) => a.startsWith("--")));
+const positional = rest.filter((a) => !a.startsWith("--"));
+const formatFlag = rest.find((a) => a.startsWith("--format="))?.split("=")[1] as
+  | "auto"
+  | "pg_dump-custom"
+  | "logical-json"
+  | undefined;
 
-function stamp(date: Date | null | undefined): string {
-  return date ? date.toISOString().replace("T", " ").slice(0, 19) : "—";
+function line(label: string, value: unknown) {
+  console.log(`${label.padEnd(22)} ${typeof value === "object" ? JSON.stringify(value) : String(value)}`);
 }
 
-async function main() {
+async function resolveRunId(arg: string | undefined): Promise<string | undefined> {
+  if (!arg || arg === "latest") return undefined;
+  return arg;
+}
+
+try {
   switch (command) {
     case "run": {
+      const started = Date.now();
       const result = await runBackup({
         kind: "manual",
-        actorLabel: "cli/platform-backup",
+        actorLabel: `cli:${process.env.USER ?? "operator"}`,
         skipRemote: flags.has("--no-remote"),
-        onlyTables: only,
+        format: formatFlag,
       });
-      console.log(JSON.stringify(result, null, 2));
-      if (result.status !== "verified") process.exitCode = 1;
+      line("run id", result.id);
+      line("status", result.status);
+      line("format", result.format);
+      line("database", result.databaseName);
+      line("tables / rows", `${result.tables} / ${result.rows}`);
+      line("plaintext bytes", result.plaintextBytes);
+      line("artifact bytes", result.artifactBytes);
+      line("plaintext sha256", result.plaintextSha256);
+      line("artifact sha256", result.artifactSha256);
+      line("artifact path", result.artifactPath);
+      line("remote provider", result.remoteProvider ?? "(none — local only)");
+      line("remote verified", result.remoteVerified);
+      line("duration ms", result.durationMs);
+      if (result.errorClass) line("error", `${result.errorClass}: ${result.errorDetail}`);
+      console.log(
+        result.status === "verified"
+          ? "\n✓ verified: the artifact decrypts and every table reproduces its row count and content hash"
+          : "\n✗ NOT verified — this run must not be treated as a usable backup",
+      );
+      console.log(`wall clock ${Date.now() - started} ms`);
       break;
     }
-    case "list": {
-      for (const row of await listBackupRuns(20)) {
-        console.log(
-          `${row.id.slice(0, 8)}  ${stamp(row.startedAt)}  ${row.status.padEnd(9)} ${row.format.padEnd(14)} ` +
-            `${String(row.artifactBytes ?? 0).padStart(10)}B  remote=${row.remoteProvider ?? "—"}  ${row.errorClass ?? ""}`,
-        );
-      }
-      const inv = await artifactInventory();
-      console.log(`artifacts on disk: ${inv.files.length} (orphans: ${inv.orphans.length})`);
-      break;
-    }
+
     case "verify": {
-      const id = args[0];
-      if (!id) throw new Error("usage: verify <runId|latest>");
-      const runId = id === "latest" ? (await listBackupRuns(1))[0]?.id : id;
-      if (!runId) throw new Error("no runs found");
-      const result = await verifyBackup(runId);
-      console.log(JSON.stringify(result, null, 2));
-      if (result.status !== "verified") process.exitCode = 1;
+      const runId = await resolveRunId(positional[0]);
+      const target =
+        runId ?? (await listBackupRuns(1))[0]?.id ?? (() => {
+          throw new Error("no backup run to verify");
+        })();
+      const result = await verifyBackup(target);
+      line("run id", result.id);
+      line("status", result.status);
+      for (const check of result.checks) {
+        line(`  ${check.skipped ? "○" : check.ok ? "✓" : "✗"} ${check.name}`, check.detail);
+      }
       break;
     }
+
     case "drill": {
-      const runId = args[0];
       const result = await runRestoreDrill({
-        runId,
-        actorLabel: "cli/platform-backup",
+        runId: await resolveRunId(positional[0]),
+        actorLabel: `cli:${process.env.USER ?? "operator"}`,
         keepSchema: flags.has("--keep"),
       });
-      console.log(JSON.stringify(result, null, 2));
-      if (result.status !== "passed") process.exitCode = 1;
-      break;
-    }
-    case "prune": {
-      console.log(JSON.stringify(await pruneBackups(), null, 2));
-      break;
-    }
-    case "freshness": {
-      console.log(JSON.stringify(await backupFreshness(), null, 2));
-      break;
-    }
-    default:
+      line("source run", result.runId);
+      line("target schema", result.schema);
+      line("status", result.status);
+      line("tables / rows", `${result.tables} / ${result.rows}`);
+      line("duration ms", result.durationMs);
+      console.log("\ninvariants:");
+      for (const check of result.invariants?.checks ?? []) {
+        console.log(`  ${check.skipped ? "○" : check.ok ? "✓" : "✗"} ${check.name.padEnd(20)} ${check.detail}`);
+      }
+      if (result.error) line("error", result.error);
       console.log(
-        "usage: platform-backup.mts run|list|verify <id>|drill [id]|prune|freshness [--no-remote] [--only=t1,t2] [--keep]",
+        result.status === "passed"
+          ? `\n✓ restore drill passed — the backup restores and the invariants hold (RTO ≈ ${(result.durationMs / 1000).toFixed(1)} s)`
+          : "\n✗ restore drill FAILED — the backup is not provably restorable",
       );
-  }
-  process.exit(0);
-}
+      break;
+    }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+    case "prune": {
+      line("retention", await pruneBackups());
+      break;
+    }
+
+    case "status": {
+      const freshness = await backupFreshness();
+      line("last verified", freshness.lastVerifiedAt?.toISOString() ?? "(never)");
+      line("age hours", freshness.ageHours === null ? "(n/a)" : freshness.ageHours.toFixed(2));
+      line("threshold hours", freshness.thresholdHours);
+      line("stale", freshness.stale);
+      line("verified runs", freshness.verifiedCount);
+      line("last run status", freshness.lastRunStatus ?? "(none)");
+      line("remote", await remoteProviderStatus());
+      const version = (await db.execute(sql`select version() as v`)) as unknown as { rows: { v: string }[] };
+      line("engine", String(version.rows[0]?.v ?? "").slice(0, 60));
+      console.log("\nrecent runs:");
+      for (const run of await listBackupRuns(8)) {
+        console.log(
+          `  ${run.startedAt.toISOString()}  ${run.status.padEnd(9)} ${run.format.padEnd(15)} ${String(run.artifactBytes ?? "-").padStart(9)} B  drill=${run.drillStatus ?? "-"}`,
+        );
+      }
+      break;
+    }
+
+    default:
+      console.error(`unknown command: ${command}`);
+      process.exitCode = 1;
+  }
+} catch (err) {
+  console.error("\n✗ failed:", err instanceof Error ? err.message : err);
+  process.exitCode = 1;
+} finally {
+  await pool.end().catch(() => undefined);
+}
