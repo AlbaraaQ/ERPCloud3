@@ -11,7 +11,8 @@ import {
   companies,
 } from "@/db/schema";
 import { getLocale, getDict } from "@/i18n";
-import { TaxConfigForm, CredentialsPanel, RetryButtons } from "./tax-forms";
+import { TaxConfigForm, OnboardingPanel, RetryButtons } from "./tax-forms";
+import { getOnboardingStatus } from "@/modules/tax/onboarding";
 import { Receipt, CloudCheck, ShieldAlert, ShieldCheck, Hourglass, CloudOff } from "lucide-react";
 
 export const dynamic = "force-dynamic";
@@ -48,7 +49,8 @@ export default async function TaxPage() {
       where a.tenant_id = ${ctx.tenant!.id} and a.code in ('2102', '1106')
       group by a.code
     `)) as unknown as { rows: { code: string; bal: string }[] };
-    return { cfg: cfg ?? null, company: co ?? null, certs, subs, stats: stats.rows, vat: vat.rows };
+    const onboarding = await getOnboardingStatus(trx, ctx.tenant!.id);
+    return { cfg: cfg ?? null, company: co ?? null, certs, subs, stats: stats.rows, vat: vat.rows, onboarding };
   });
 
   const canConfigure = hasPermission(ctx, "tax.configure");
@@ -97,8 +99,13 @@ export default async function TaxPage() {
       <div className="grid gap-5 lg:grid-cols-2">
         <TaxConfigForm t={t} errors={errorsFlat} cfg={data.cfg} company={data.company} canConfigure={canConfigure} />
         <div className="space-y-5">
-          <CredentialsPanel t={t} errors={errorsFlat} canConfigure={canConfigure}
-            certs={data.certs.map((c) => ({ env: c.env, kind: c.kind, status: c.status, label: c.label }))} />
+          <OnboardingPanel
+            t={t}
+            errors={errorsFlat}
+            canConfigure={canConfigure}
+            status={data.onboarding}
+            certs={data.certs.map((c) => ({ env: c.env, kind: c.kind, status: c.status, label: c.label }))}
+          />
           {/* VAT summary */}
           <section className="card space-y-2 p-5">
             <h3 className="font-semibold">{t.taxPg.vatSummary}</h3>

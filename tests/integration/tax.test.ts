@@ -5,9 +5,12 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { X509Certificate } from "node:crypto";
 import { sql } from "drizzle-orm";
 
 const DB = process.env.DATABASE_URL;
+/** seeded company VAT for tenant A (companies.vat_number) */
+const SELLER_VAT = "310122393500003";
 const RUN = Math.random().toString(36).slice(2, 8);
 const TODAY = "2026-07-20";
 
@@ -69,30 +72,34 @@ describe.skipIf(!DB)("tax — zatca submission engine", () => {
       }),
     );
 
-    // buyer with a 15-digit VAT (standard-document trigger)
+    // buyer with a 15-digit VAT (standard-document trigger) and the complete
+    // address BR-KSA-63 requires of a Saudi buyer — the app must never invent one
     await db.execute(sql`
-      insert into customers (id, tenant_id, code, name_ar, tax_number, credit_limit, payment_terms_days)
-      values (${newId()}, ${tenantA}, ${"TAXC-" + RUN}, 'شركة مسجلة ضريبياً', '311122393500003', '10000', 30)
+      insert into customers (id, tenant_id, code, name_ar, tax_number, credit_limit, payment_terms_days,
+                             address, building_no, plot_identification, district, city, postal_code, cr_number)
+      values (${newId()}, ${tenantA}, ${"TAXC-" + RUN}, 'شركة مسجلة ضريبياً', '311122393500003', '10000', 30,
+              'طريق العليا العام', '1143', '1144', 'المرسلات', 'الرياض', '12211', '1010112233')
     `);
     vatCustomerId = await scalar(sql`select id from customers where tenant_id = ${tenantA} and code = ${"TAXC-" + RUN}`);
 
     // enable tax for tenant A with complete identity + device key
     await db.execute(sql`
-      insert into tax_configs (tenant_id, enabled, env, city, postal_code, street, district, industry)
-      values (${tenantA}, true, 'developer-portal', 'الرياض', '12345', 'طريق الملك فهد', 'العليا', 'أغذية')
-      on conflict (tenant_id) do update set enabled = true, city = 'الرياض', postal_code = '12345'
+      insert into tax_configs (tenant_id, enabled, env, city, postal_code, street, district, industry,
+                               building_no, plot_identification)
+      values (${tenantA}, true, 'developer-portal', 'الرياض', '12345', 'طريق الملك فهد', 'العليا', 'أغذية',
+              '2322', '2223')
+      on conflict (tenant_id) do update set enabled = true, city = 'الرياض', postal_code = '12345',
+              street = 'طريق الملك فهد', district = 'العليا', building_no = '2322', plot_identification = '2223'
     `);
-    const { generateDeviceKeys } = await import("@/modules/tax/crypto");
-    const keys = generateDeviceKeys();
-    await db.execute(sql`
-      insert into zatca_certificates (id, tenant_id, env, kind, label, private_key, public_key, status)
-      values (${newId()}, ${tenantA}, 'developer-portal', 'device_key', 'test-egs', ${keys.privateKeyPem}, ${keys.publicKeySpkiPem}, 'active')
-    `);
-    // production credential (test-fake BST/secret for the transport boundary)
-    await db.execute(sql`
-      insert into zatca_certificates (id, tenant_id, env, kind, label, binary_security_token, secret, status)
-      values (${newId()}, ${tenantA}, 'developer-portal', 'production', 'test-pcsid', 'dGVzdA==', 'c2VjcmV0', 'active')
-    `);
+    // real EGS credential: local CA issues a certificate over the stored EGS key,
+    // so the production signing path runs with verifiable cryptography
+    const { mintLocalCsid, seedTestCredential } = await import("../helpers/zatca");
+    const cred = mintLocalCsid({
+      vatNumber: SELLER_VAT,
+      organizationName: "3111223935",
+      organizationalUnitName: "3111122233",
+    });
+    await seedTestCredential(db, tenantA, "developer-portal", cred);
   });
 
   afterAll(async () => {
@@ -113,7 +120,7 @@ describe.skipIf(!DB)("tax — zatca submission engine", () => {
     const { createAndPostInvoice } = await import("@/modules/sales/invoices");
     const { computeInvoiceHash } = await import("@/modules/tax/xml");
     const { normalizeXmlForHash } = await import("@/modules/tax/submissions");
-    const { initialPih } = await import("@/modules/tax/crypto");
+    const { initialPih } = await import("@/modules/tax/signature");
 
     
     // Post BOTH invoices inside ONE tenant-lock section: posting transactions
@@ -169,7 +176,18 @@ describe.skipIf(!DB)("tax — zatca submission engine", () => {
     expect(parts[1].value.toString("utf8")).toBe("310122393500003");
     expect(parts[3].value.toString("utf8")).toBe("138.00");
     expect(parts[5].value.toString("utf8")).toBe(sub.invoice_hash);
-    expect(parts[7].value.length).toBe(65); // 0x04 || X || Y (uncompressed)
+    // tag 8 = X.509 SPKI DER of the EGS key (88 bytes for secp256k1 — the SDK
+    // samples carry exactly this), tag 9 = the certificate's own signature
+    expect(parts[7].value.length).toBe(88);
+    const certB64 = /<ds:X509Certificate>([^<]+)<\/ds:X509Certificate>/.exec(xml)?.[1];
+    expect(certB64).toBeTruthy();
+    const cert = new X509Certificate(Buffer.from(certB64!, "base64"));
+    const { inspectCertificate } = await import("@/modules/tax/signature");
+    const info = inspectCertificate(certB64!);
+    expect(parts[7].value.toString("base64")).toBe(
+      Buffer.from(cert.publicKey.export({ type: "spki", format: "der" })).toString("base64"),
+    );
+    expect(parts[8].value.toString("base64")).toBe(info.signatureValue.toString("base64"));
     expect(parts[6].value.toString("utf8").length).toBeGreaterThan(60); // real signature
 
     // chain continuity on the second invoice (posted in the same locked section)
@@ -202,6 +220,38 @@ describe.skipIf(!DB)("tax — zatca submission engine", () => {
     expect(sub.status).toBe("clearance_pending");
     const parts = decodeTlv(sub.qr_base64 as string);
     expect(parts.map((p) => p.tag)).toEqual([1, 2, 3, 4, 5]);
+  });
+
+  it("standard invoice for a buyer without a complete address is blocked, never fabricated (BR-KSA-63)", async () => {
+    const { createAndPostInvoice } = await import("@/modules/sales/invoices");
+    await db.execute(sql`
+      insert into customers (id, tenant_id, code, name_ar, tax_number, credit_limit, payment_terms_days)
+      values (${newId()}, ${tenantA}, ${"TAXNA-" + RUN}, 'عميل بلا عنوان', '311122393500003', '10000', 30)
+    `);
+    const bare = await scalar(sql`select id from customers where tenant_id = ${tenantA} and code = ${"TAXNA-" + RUN}`);
+
+    const inv = await withTenant(tenantA, (trx) =>
+      createAndPostInvoice(trx, ctx(), {
+        customerId: bare, warehouseId: mainWh, businessDate: TODAY, isCredit: true,
+        lines: [{ productId: productA, qtyBase: "1" }],
+      }, false),
+    );
+    const sub = (
+      (await db.execute(sql`select * from invoice_submissions where invoice_id = ${inv.invoiceId}`)) as unknown as {
+        rows: Record<string, unknown>[];
+      }
+    ).rows[0];
+    expect(sub.doc_type).toBe("standard");
+    // a Saudi buyer needs KSA-19/17, street, postal code, city and neighborhood:
+    // the platform requirement is surfaced as a blocking issue instead of being
+    // satisfied with invented address data
+    expect(sub.status).toBe("blocked_config");
+    expect(String(sub.last_error)).toContain("BR-KSA-63");
+    const buyerBlock =
+      /<cac:AccountingCustomerParty>[\s\S]*?<\/cac:AccountingCustomerParty>/.exec(String(sub.xml))?.[0] ?? "";
+    expect(buyerBlock).not.toContain("<cbc:StreetName>");
+    expect(buyerBlock).not.toContain("<cbc:BuildingNumber>");
+    expect(await scalar(sql`select tax_status from sales_invoices where id = ${inv.invoiceId}`)).toBe("local_draft");
   });
 
   it("processing via gated mock transport: reported/cleared, mirrors invoice, retry same uuid/icv", async () => {
@@ -366,7 +416,9 @@ describe.skipIf(!DB)("tax — zatca submission engine", () => {
     expect(st).toBe("draft"); // unchanged
 
     await db.execute(sql`
-      update tax_configs set enabled = true, city = 'الرياض', postal_code = '12345' where tenant_id = ${tenantA}
+      update tax_configs set enabled = true, city = 'الرياض', postal_code = '12345',
+        street = 'طريق الملك فهد', district = 'العليا', building_no = '2322', plot_identification = '2223'
+      where tenant_id = ${tenantA}
     `);
   });
 });

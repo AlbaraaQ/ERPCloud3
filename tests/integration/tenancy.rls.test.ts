@@ -15,6 +15,10 @@ const TEST_PW = "rls_test_pw_2026";
 const admin = DB ? new pg.Pool({ connectionString: DB }) : null;
 let tenantA = "";
 let tenantB = "";
+/** PGlite serves every logical connection from one backend session, so the test
+ *  role cannot be assumed independently of the owner: the policy assertions are
+ *  skipped there (environment-limited, AC-025 §2) and never reported as passing. */
+let sharedSession = true;
 
 async function q(pool: pg.Pool | pg.PoolClient, text: string, params?: unknown[]) {
   return pool.query(text, params);
@@ -27,6 +31,9 @@ describe.skipIf(!DB)("RLS tenant isolation (db layer)", () => {
     expect(tenants.rows.length).toBeGreaterThanOrEqual(2);
     tenantA = tenants.rows[0].id;
     tenantB = tenants.rows[1].id;
+
+    const { isSharedSessionEngine } = await import("../helpers/db-engine");
+    sharedSession = await isSharedSessionEngine(DB!);
 
     await q(
       admin,
@@ -59,7 +66,8 @@ describe.skipIf(!DB)("RLS tenant isolation (db layer)", () => {
     });
   }
 
-  it("without tenant context: zero visibility on tenant tables", async () => {
+  it("without tenant context: zero visibility on tenant tables", async ({ skip }) => {
+    if (sharedSession) skip();
     const pool = testClient();
     try {
       const r = await q(pool, `select count(*)::int as n from public.users`);
@@ -71,7 +79,8 @@ describe.skipIf(!DB)("RLS tenant isolation (db layer)", () => {
     }
   });
 
-  it("with tenant A: sees only tenant A users", async () => {
+  it("with tenant A: sees only tenant A users", async ({ skip }) => {
+    if (sharedSession) skip();
     const pool = testClient();
     try {
       const client = await pool.connect();
@@ -91,7 +100,8 @@ describe.skipIf(!DB)("RLS tenant isolation (db layer)", () => {
     }
   });
 
-  it("cannot update another tenant's rows (B invisible under A)", async () => {
+  it("cannot update another tenant's rows (B invisible under A)", async ({ skip }) => {
+    if (sharedSession) skip();
     const pool = testClient();
     try {
       const client = await pool.connect();
@@ -109,7 +119,8 @@ describe.skipIf(!DB)("RLS tenant isolation (db layer)", () => {
     }
   });
 
-  it("cannot insert into another tenant (WITH CHECK)", async () => {
+  it("cannot insert into another tenant (WITH CHECK)", async ({ skip }) => {
+    if (sharedSession) skip();
     const pool = testClient();
     try {
       const client = await pool.connect();
@@ -134,7 +145,8 @@ describe.skipIf(!DB)("RLS tenant isolation (db layer)", () => {
     }
   });
 
-  it("audit_log inserts via write_audit work; direct read is tenant-scoped", async () => {
+  it("audit_log inserts via write_audit work; direct read is tenant-scoped", async ({ skip }) => {
+    if (sharedSession) skip();
     const pool = testClient();
     try {
       const client = await pool.connect();

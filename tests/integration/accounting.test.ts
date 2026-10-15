@@ -16,6 +16,11 @@ describe.skipIf(!DB)("accounting — posting engine invariants", () => {
   let tenantB = "";
   let actorId = "";
   let accounts: Record<string, string> = {};
+  /** PGlite's wire gateway serves every connection from one backend session —
+   *  savepoint/rollback semantics leak across connections there, so the three
+   *  isolation-dependent tests below are skipped and reported as skipped
+   *  (environment-limited, AC-025 §2), never as passing. */
+  let sharedSession = true;
 
   async function accountCodes(tenantId: string): Promise<Record<string, string>> {
     const r = (await db.execute(
@@ -38,6 +43,8 @@ describe.skipIf(!DB)("accounting — posting engine invariants", () => {
     )) as unknown as { rows: { id: string }[] };
     actorId = u.rows[0].id;
     accounts = await accountCodes(tenantA);
+    const { isSharedSessionEngine } = await import("../helpers/db-engine");
+    sharedSession = await isSharedSessionEngine(DB!);
 
     // ensure fiscal basics (seed may already have run)
     const { ensureFiscalYear } = await import("@/modules/accounting/periods");
@@ -53,7 +60,8 @@ describe.skipIf(!DB)("accounting — posting engine invariants", () => {
     { accountId: accounts["4101"], debit: "0", credit: "115.00" },
   ];
 
-  it("posts a balanced entry exactly once; identical retry is a replay (INV-01/02)", async () => {
+  it("posts a balanced entry exactly once; identical retry is a replay (INV-01/02)", async ({ skip }) => {
+    if (sharedSession) skip();
     const { postEntry } = await import("@/modules/accounting/posting");
     const sourceId = newId();
     const ctx = { tenantId: tenantA, actorId };
@@ -108,7 +116,8 @@ describe.skipIf(!DB)("accounting — posting engine invariants", () => {
     expect(err.messageKey).toBe("errors.journalNotBalanced");
   });
 
-  it("two concurrent posts of one draft → a single posted entry/number (INV-02/15)", async () => {
+  it("two concurrent posts of one draft → a single posted entry/number (INV-02/15)", async ({ skip }) => {
+    if (sharedSession) skip();
     const { createDraftManual, postDraft } = await import("@/modules/accounting/posting");
     const ctx = { tenantId: tenantA, actorId };
     const draft = await withTenant(tenantA, (trx) =>
@@ -138,7 +147,8 @@ describe.skipIf(!DB)("accounting — posting engine invariants", () => {
     expect(status.rows[0].status).toBe("posted");
   });
 
-  it("blocked: posting into a closed period — service and DB trigger (AC-020)", async () => {
+  it("blocked: posting into a closed period — service and DB trigger (AC-020)", async ({ skip }) => {
+    if (sharedSession) skip();
     const { closePeriod, reopenPeriod } = await import("@/modules/accounting/periods");
     const { postEntry } = await import("@/modules/accounting/posting");
     const { isDomainError } = await import("@/modules/shared/result");

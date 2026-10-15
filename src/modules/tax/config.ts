@@ -4,23 +4,110 @@
  * guessed rate, never a silent exemption.
  */
 
-import { eq } from "drizzle-orm";
-import { taxConfigs, companies, customers } from "@/db/schema";
+import { eq, desc } from "drizzle-orm";
+import { createPublicKey } from "node:crypto";
+import { taxConfigs, companies, customers, zatcaCertificates } from "@/db/schema";
 import { and } from "drizzle-orm";
 import type { Trx } from "@/modules/shared/db-context";
 import { errors } from "@/modules/shared/result";
-import type { DocType } from "./xml";
+import { PAYMENT_MEANS, type DocType } from "./xml";
+import { inspectCertificate } from "./signature";
 
 export interface SellerIdentityResolved {
   registrationName: string;
   vatNumber: string;
   crn: string | null;
   street: string | null;
+  additionalStreet: string | null;
+  buildingNo: string | null;
+  plotIdentification: string | null;
   district: string | null;
   city: string | null;
   postalCode: string | null;
   env: "developer-portal" | "simulation" | "core";
   freeGoodsDeemedSupply: boolean;
+}
+
+export type CsidKind = "compliance" | "production";
+
+export interface SigningMaterial {
+  kind: CsidKind;
+  env: SellerIdentityResolved["env"];
+  /** base64 X.509 (ZATCA `binarySecurityToken`) */
+  certificateB64Der: string;
+  privateKeyPem: string;
+  certificateExpiresAt: Date | null;
+  deviceKeyId: string | null;
+}
+
+/**
+ * Resolve the certificate + key that sign documents for a given stage.
+ * Documents are signed with the EGS key pair whose CSR produced the CSID, so a
+ * certificate that does not match the stored public key is refused instead of
+ * producing an unverifiable signature (D-012: never fabricate).
+ */
+export async function resolveSigningMaterial(
+  trx: Trx,
+  tenantId: string,
+  env: SellerIdentityResolved["env"],
+  kind: CsidKind,
+): Promise<SigningMaterial | null> {
+  const [csid] = await trx
+    .select()
+    .from(zatcaCertificates)
+    .where(
+      and(
+        eq(zatcaCertificates.tenantId, tenantId),
+        eq(zatcaCertificates.env, env),
+        eq(zatcaCertificates.kind, kind),
+        eq(zatcaCertificates.status, "active"),
+      ),
+    )
+    .orderBy(desc(zatcaCertificates.createdAt))
+    .limit(1);
+  if (!csid?.binarySecurityToken) return null;
+
+  const keys = csid.deviceKeyId
+    ? await trx
+        .select()
+        .from(zatcaCertificates)
+        .where(and(eq(zatcaCertificates.tenantId, tenantId), eq(zatcaCertificates.id, csid.deviceKeyId)))
+        .limit(1)
+    : await trx
+        .select()
+        .from(zatcaCertificates)
+        .where(
+          and(
+            eq(zatcaCertificates.tenantId, tenantId),
+            eq(zatcaCertificates.env, env),
+            eq(zatcaCertificates.kind, "device_key"),
+            eq(zatcaCertificates.status, "active"),
+          ),
+        )
+        .orderBy(desc(zatcaCertificates.createdAt))
+        .limit(1);
+  const key = keys[0];
+  if (!key?.privateKey || !key.publicKey) return null;
+
+  const certificate = inspectCertificate(csid.binarySecurityToken);
+  const certPublicKey = Buffer.from(
+    (createPublicKey(certificate.publicKeyPem).export({ type: "spki", format: "der" }) as Buffer),
+  ).toString("base64");
+  const storedPublicKey = Buffer.from(
+    (createPublicKey(key.publicKey).export({ type: "spki", format: "der" }) as Buffer),
+  ).toString("base64");
+  if (certPublicKey !== storedPublicKey) {
+    throw errors.configuration("errors.certificateKeyMismatch", kind);
+  }
+
+  return {
+    kind,
+    env,
+    certificateB64Der: csid.binarySecurityToken.trim(),
+    privateKeyPem: key.privateKey,
+    certificateExpiresAt: certificate.notAfter,
+    deviceKeyId: key.id,
+  };
 }
 
 /** Read the tenant tax config; null when e-invoicing not enabled. */
@@ -53,6 +140,9 @@ export async function resolveSellerIdentity(trx: Trx, tenantId: string): Promise
     vatNumber: co.vatNumber!,
     crn: co.crNumber ?? null,
     street: cfg.street ?? null,
+    additionalStreet: cfg.additionalStreet ?? null,
+    buildingNo: cfg.buildingNo ?? null,
+    plotIdentification: cfg.plotIdentification ?? null,
     district: cfg.district ?? null,
     city: cfg.city!,
     postalCode: cfg.postalCode!,
@@ -88,11 +178,15 @@ export async function classifyInvoice(
   };
 }
 
-/** PaymentMeansCode for UBL (verify mapping at onboarding). */
-export function paymentMeansCodeFor(methods: string[]): string {
-  if (methods.length === 0) return "30"; // credit/settlement
-  if (methods.includes("card")) return "48";
-  if (methods.includes("cash")) return "10";
-  if (methods.includes("bank_transfer")) return "30";
-  return "30";
+/**
+ * Payment path → UBL PaymentMeansCode (UN/ECE 4461). Kept in one place; the
+ * authoritative list lives in ./xml.ts (PAYMENT_MEANS) next to its tests.
+ */
+export function paymentMeansCodesFor(methods: string[]): string[] {
+  const codes: string[] = [];
+  if (methods.includes("cash")) codes.push(PAYMENT_MEANS.cash);
+  if (methods.includes("card")) codes.push(PAYMENT_MEANS.card);
+  if (methods.includes("bank_transfer")) codes.push(PAYMENT_MEANS.bankTransfer);
+  if (codes.length === 0) codes.push(PAYMENT_MEANS.credit);
+  return [...new Set(codes)];
 }

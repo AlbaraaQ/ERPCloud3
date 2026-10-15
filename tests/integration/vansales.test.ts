@@ -32,12 +32,15 @@ describe.skipIf(!DB)("vansales — provisioning, sync, settlement", () => {
     return Object.values(r.rows[0])[0] as string;
   }
 
+  /** balance of a warehouse/product pair — 0 when no balance row exists yet */
   async function balance(warehouseId: string, productId: string): Promise<number> {
-    const v = await scalar(sql`
-      select coalesce(on_hand, 0)::text from stock_balances
-      where tenant_id = ${tenantA} and warehouse_id = ${warehouseId} and product_id = ${productId}
-    `);
-    return Number(v);
+    const r = (await db.execute(sql`
+      select coalesce((
+        select on_hand from stock_balances
+        where tenant_id = ${tenantA} and warehouse_id = ${warehouseId} and product_id = ${productId}
+      ), 0)::text as v
+    `)) as unknown as { rows: { v: string }[] };
+    return Number(r.rows[0].v);
   }
 
   beforeAll(async () => {

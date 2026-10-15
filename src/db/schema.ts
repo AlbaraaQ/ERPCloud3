@@ -21,6 +21,7 @@ import {
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { uuidv7 } from "uuidv7";
+import type { ExemptionConfig } from "@/modules/tax/exemption";
 
 const id = () => uuid("id").primaryKey().$defaultFn(() => uuidv7());
 
@@ -775,7 +776,13 @@ export const customers = pgTable(
     nameEn: varchar("name_en", { length: 200 }),
     phone: varchar("phone", { length: 40 }),
     taxNumber: varchar("tax_number", { length: 30 }),
+    crNumber: varchar("cr_number", { length: 30 }),
     address: text("address"),
+    buildingNo: varchar("building_no", { length: 10 }),
+    plotIdentification: varchar("plot_identification", { length: 10 }),
+    district: varchar("district", { length: 120 }),
+    city: varchar("city", { length: 120 }),
+    postalCode: varchar("postal_code", { length: 10 }),
     creditLimit: numeric("credit_limit", { precision: 19, scale: 4 }).notNull().default("0"),
     paymentTermsDays: bigint("payment_terms_days", { mode: "number" }).notNull().default(0),
     creditHold: boolean("credit_hold").notNull().default(false),
@@ -861,6 +868,8 @@ export const salesInvoices = pgTable(
     total: numeric("total", { precision: 19, scale: 4 }).notNull().default("0"),
     paidTotal: numeric("paid_total", { precision: 19, scale: 4 }).notNull().default("0"),
     salespersonUserId: uuid("salesperson_user_id"),
+    /** UBL PaymentMeans/InstructionNote — reason for issuing a credit note (BR-KSA-17) */
+    taxNote: varchar("tax_note", { length: 127 }),
     /** stable client-generated op id — sync idempotency anchor (D-011). */
     clientOpId: uuid("client_op_id"),
     postedAt: timestamp("posted_at", { withTimezone: true, mode: "date" }),
@@ -1468,7 +1477,21 @@ export const taxConfigs = pgTable("tax_configs", {
   city: varchar("city", { length: 120 }),
   postalCode: varchar("postal_code", { length: 10 }),
   buildingNo: varchar("building_no", { length: 10 }),
+  plotIdentification: varchar("plot_identification", { length: 10 }),
+  additionalStreet: varchar("additional_street", { length: 200 }),
   industry: varchar("industry", { length: 120 }),
+  /** requestID returned by the compliance-CSID call (needed for production CSID) */
+  complianceRequestId: varchar("compliance_request_id", { length: 120 }),
+  /** EGS serial used in the CSR (`1-Solution|2-Model|3-UUID`) */
+  egsSerialNumber: varchar("egs_serial_number", { length: 64 }),
+  /**
+   * Tenant ruling for zero-rated/exempt/out-of-scope supplies:
+   *   { zero: "VATEX-SA-32", exempt: "VATEX-SA-29-7", outOfScope: {code, reason} }
+   * Codes come from the official catalogue (src/modules/tax/exemption.ts); the
+   * reason text is derived from it, never free-form. Unset → issuance of such
+   * lines is BLOCKED instead of guessing a ruling (INV-17, BR-KSA-CL-04).
+   */
+  exemptionReasons: jsonb("exemption_reasons").$type<ExemptionConfig>(),
   /** free-goods VAT policy flag (D-021/OQ-4) */
   freeGoodsDeemedSupply: boolean("free_goods_deemed_supply").notNull().default(false),
   onboardingState: varchar("onboarding_state", { length: 40 }).notNull().default("none"), // none | compliance | production
@@ -1493,6 +1516,12 @@ export const zatcaCertificates = pgTable(
     binarySecurityToken: text("binary_security_token"),
     secret: text("secret"),
     requestId: varchar("request_id", { length: 120 }),
+    /** EGS key pair whose CSR produced this CSID (invoices are signed with it) */
+    deviceKeyId: uuid("device_key_id"),
+    /** base64 of the CSR PEM that was submitted for this CSID (audit trail) */
+    csr: text("csr"),
+    /** parsed from the returned X.509 certificate (renew before this date) */
+    certificateExpiresAt: timestamp("certificate_expires_at", { withTimezone: true, mode: "date" }),
     status: varchar("status", { length: 20 }).notNull().default("active"),
     expiresAt: timestamp("expires_at", { withTimezone: true, mode: "date" }),
     createdAt: createdAt(),
@@ -1512,8 +1541,9 @@ export const invoiceChains = pgTable(
       .notNull()
       .references(() => tenants.id, { onDelete: "restrict" }),
     icv: bigint("icv", { mode: "number" }).notNull().default(0),
+    /** BR-KSA-26 genesis: base64 of the hex SHA-256 digest of "0". */
     lastHash: varchar("last_hash", { length: 96 }).notNull().default(
-      "NWZlY2ViNjIzNGRjMjc5OWJkOTU5M2NlMWZkM2Q2MjQxMjBiNTQ4NjE5YmY0Mzk3ZTk2NjcyZDUxMGE2NGE1Mg==",
+      "NWZlY2ViNjZmZmM4NmYzOGQ5NTI3ODZjNmQ2OTZjNzljMmRiYzIzOWRkNGU5MWI0NjcyOWQ3M2EyN2ZiNTdlOQ==",
     ),
     updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" })
       .notNull()
@@ -1556,6 +1586,44 @@ export const invoiceSubmissions = pgTable(
     uniqueIndex("invoice_submissions_invoice_uq").on(t.invoiceId),
     uniqueIndex("invoice_submissions_uuid_uq").on(t.tenantId, t.invoiceUuid),
     index("invoice_submissions_status_idx").on(t.tenantId, t.status),
+  ],
+);
+
+/**
+ * The six mandatory compliance-check documents per onboarding run (standard /
+ * simplified × invoice / credit note / debit note). Every attempt is journaled
+ * with the platform's validation result — acceptance is never inferred.
+ */
+export const zatcaComplianceChecks = pgTable(
+  "zatca_compliance_checks",
+  {
+    id: id(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "restrict" }),
+    env: zatcaEnvironment("env").notNull(),
+    /** one run per onboarding attempt (regenerating the CSR starts a new run) */
+    runId: uuid("run_id").notNull(),
+    docKind: varchar("doc_kind", { length: 40 }).notNull(),
+    status: varchar("status", { length: 20 }).notNull().default("pending"), // pending | passed | failed
+    invoiceUuid: uuid("invoice_uuid"),
+    icv: bigint("icv", { mode: "number" }),
+    invoiceHash: varchar("invoice_hash", { length: 96 }),
+    /** PIH the document was built with — reused verbatim on retries (INV-02) */
+    previousHash: varchar("previous_hash", { length: 96 }),
+    xml: text("xml"),
+    qrBase64: text("qr_base64"),
+    validationStatus: varchar("validation_status", { length: 20 }),
+    response: jsonb("response").$type<Record<string, unknown>>(),
+    errorMessages: jsonb("error_messages").$type<unknown[]>(),
+    warningMessages: jsonb("warning_messages").$type<unknown[]>(),
+    attempts: bigint("attempts", { mode: "number" }).notNull().default(0),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex("zatca_compliance_checks_uq").on(t.tenantId, t.env, t.runId, t.docKind),
+    index("zatca_compliance_checks_tenant_idx").on(t.tenantId, t.status),
   ],
 );
 

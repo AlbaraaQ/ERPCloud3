@@ -14,6 +14,12 @@ import type { ActionResult } from "@/modules/shared/action-result";
 import { taxConfigs, zatcaCertificates } from "@/db/schema";
 import { writeAudit } from "@/modules/shared/audit";
 import { generateDeviceKeys } from "./crypto";
+import {
+  issueProductionCsid,
+  renewProductionCsid,
+  requestComplianceCsid,
+  runComplianceChecks,
+} from "./onboarding";
 import { retrySubmission } from "./processor";
 import { newId } from "@/modules/shared/ids";
 import { db } from "@/db";
@@ -220,6 +226,83 @@ export async function retrySubmissionAction(formData: FormData): Promise<ActionR
       await boss.stop();
     } catch (e) {
       logger.warn({ err: e }, "immediate zatca kick failed — scheduled cycle will retry");
+    }
+  });
+}
+
+/* ------------------------------------------------------ onboarding (D-024) */
+
+/**
+ * Automated onboarding: the whole CSR → compliance CSID → six compliance checks
+ * → production CSID cycle runs from the tax screen. The manual credential form
+ * above stays available for integrations that onboard elsewhere (documented
+ * fallback, same tables).
+ */
+export async function startOnboardingAction(formData: FormData): Promise<ActionResult> {
+  const otp = String(formData.get("otp") ?? "").trim();
+  const ctx = await getSessionContext();
+  if (!ctx?.tenant || !ctx.userId) return { ok: false, errorKey: "errors.sessionInvalid" };
+  return withTenant(ctx.tenant.id, async (trx) => {
+    try {
+      requirePermission(ctx, "tax.configure");
+      const out = await requestComplianceCsid(trx, ctx.tenant!.id, { otp, actorId: ctx.userId! });
+      revalidatePath("/tax");
+      return { ok: out.ok, errorKey: out.ok ? undefined : "errors.zatcaOnboardingFailed", okKey: out.message } as ActionResult;
+    } catch (e) {
+      if (isDomainError(e)) return { ok: false, errorKey: e.messageKey } as ActionResult;
+      logger.error({ err: e }, "startOnboarding failed");
+      return { ok: false, errorKey: "errors.unexpected" } as ActionResult;
+    }
+  });
+}
+
+export async function runComplianceChecksAction(): Promise<ActionResult> {
+  const ctx = await getSessionContext();
+  if (!ctx?.tenant || !ctx.userId) return { ok: false, errorKey: "errors.sessionInvalid" };
+  return withTenant(ctx.tenant.id, async (trx) => {
+    try {
+      requirePermission(ctx, "tax.configure");
+      const out = await runComplianceChecks(trx, ctx.tenant!.id, ctx.userId!);
+      revalidatePath("/tax");
+      return { ok: out.ok, errorKey: out.ok ? undefined : "errors.zatcaComplianceFailed", okKey: out.message } as ActionResult;
+    } catch (e) {
+      if (isDomainError(e)) return { ok: false, errorKey: e.messageKey } as ActionResult;
+      logger.error({ err: e }, "runComplianceChecks failed");
+      return { ok: false, errorKey: "errors.unexpected" } as ActionResult;
+    }
+  });
+}
+
+export async function issueProductionCsidAction(): Promise<ActionResult> {
+  const ctx = await getSessionContext();
+  if (!ctx?.tenant || !ctx.userId) return { ok: false, errorKey: "errors.sessionInvalid" };
+  return withTenant(ctx.tenant.id, async (trx) => {
+    try {
+      requirePermission(ctx, "tax.configure");
+      const out = await issueProductionCsid(trx, ctx.tenant!.id, ctx.userId!);
+      revalidatePath("/tax");
+      return { ok: out.ok, errorKey: out.ok ? undefined : "errors.zatcaOnboardingFailed", okKey: out.message } as ActionResult;
+    } catch (e) {
+      if (isDomainError(e)) return { ok: false, errorKey: e.messageKey } as ActionResult;
+      logger.error({ err: e }, "issueProductionCsid failed");
+      return { ok: false, errorKey: "errors.unexpected" } as ActionResult;
+    }
+  });
+}
+
+export async function renewProductionCsidAction(): Promise<ActionResult> {
+  const ctx = await getSessionContext();
+  if (!ctx?.tenant || !ctx.userId) return { ok: false, errorKey: "errors.sessionInvalid" };
+  return withTenant(ctx.tenant.id, async (trx) => {
+    try {
+      requirePermission(ctx, "tax.configure");
+      const out = await renewProductionCsid(trx, ctx.tenant!.id, ctx.userId!);
+      revalidatePath("/tax");
+      return { ok: out.ok, errorKey: out.ok ? undefined : "errors.zatcaOnboardingFailed", okKey: out.message } as ActionResult;
+    } catch (e) {
+      if (isDomainError(e)) return { ok: false, errorKey: e.messageKey } as ActionResult;
+      logger.error({ err: e }, "renewProductionCsid failed");
+      return { ok: false, errorKey: "errors.unexpected" } as ActionResult;
     }
   });
 }
