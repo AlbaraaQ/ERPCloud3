@@ -13,6 +13,7 @@ import {
   timestamp,
   jsonb,
   bigint,
+  integer,
   numeric,
   uniqueIndex,
   index,
@@ -100,6 +101,11 @@ export const platformUsers = pgTable(
     role: platformRole("role").notNull().default("ops"),
     status: userStatus("status").notNull().default("active"),
     lastLoginAt: timestamp("last_login_at", { withTimezone: true, mode: "date" }),
+    /** TOTP secret, AES-256-GCM encrypted with the app key (D-024) — never plaintext. */
+    totpSecretCipher: text("totp_secret_cipher"),
+    totpEnrolledAt: timestamp("totp_enrolled_at", { withTimezone: true, mode: "date" }),
+    failedLogins: integer("failed_logins").notNull().default(0),
+    lockedUntil: timestamp("locked_until", { withTimezone: true, mode: "date" }),
     createdAt: createdAt(),
   },
   (t) => [uniqueIndex("platform_users_email_uq").on(sql`lower(${t.email})`)],
@@ -1627,6 +1633,359 @@ export const zatcaComplianceChecks = pgTable(
   ],
 );
 
+/* ================================================================ Phase 8
+ * Platform administration (PLATFORM_ADMIN.md / D-020): plans & subscriptions,
+ * feature flags, usage metering, support grants (break-glass), the platform
+ * audit log, backups, alerts, tenant exports and the deletion workflow.
+ * These tables are platform-owned: none is RLS-scoped to a tenant and none
+ * holds tenant financial content (ids, counts and status only).
+ */
+
+export const subscriptionStatus = pgEnum("subscription_status", [
+  "trialing",
+  "active",
+  "past_due",
+  "cancelled",
+  "expired",
+]);
+export const alertSeverity = pgEnum("alert_severity", ["info", "warning", "critical"]);
+export const alertStatus = pgEnum("alert_status", ["open", "acknowledged", "resolved"]);
+export const backupKind = pgEnum("backup_kind", ["scheduled", "manual", "safety"]);
+export const backupStatus = pgEnum("backup_status", [
+  "running",
+  "local_ok",
+  "uploaded",
+  "verified",
+  "failed",
+  "pruned",
+]);
+export const retentionClass = pgEnum("retention_class", ["latest", "daily", "weekly", "pinned"]);
+export const exportStatus = pgEnum("export_status", ["queued", "running", "ready", "failed", "expired"]);
+export const deletionStatus = pgEnum("deletion_status", [
+  "requested",
+  "cooling_off",
+  "approved",
+  "purged",
+  "cancelled",
+]);
+
+/** Entitlements live in one JSONB document per plan (feature keys + numeric quotas). */
+export interface PlanEntitlements {
+  features?: string[];
+  quotas?: {
+    users?: number;
+    branches?: number;
+    warehouses?: number;
+    invoicesPerMonth?: number;
+    storageMb?: number;
+  };
+}
+
+export const plans = pgTable("plans", {
+  code: varchar("code", { length: 50 }).primaryKey(),
+  name: varchar("name", { length: 200 }).notNull(),
+  nameEn: varchar("name_en", { length: 200 }),
+  priceMonthly: numeric("price_monthly", { precision: 12, scale: 2 }).notNull().default("0"),
+  currency: varchar("currency", { length: 3 }).notNull().default("SAR"),
+  entitlements: jsonb("entitlements").$type<PlanEntitlements>().notNull().default({}),
+  isActive: boolean("is_active").notNull().default(true),
+  sortOrder: integer("sort_order").notNull().default(0),
+  notes: text("notes"),
+  createdAt: createdAt(),
+  updatedAt: updatedAt(),
+});
+
+export const subscriptions = pgTable(
+  "subscriptions",
+  {
+    id: id(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "restrict" }),
+    planCode: varchar("plan_code", { length: 50 })
+      .notNull()
+      .references(() => plans.code, { onDelete: "restrict" }),
+    status: subscriptionStatus("status").notNull().default("trialing"),
+    startedAt: timestamp("started_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
+    trialEndsAt: timestamp("trial_ends_at", { withTimezone: true, mode: "date" }),
+    renewsAt: timestamp("renews_at", { withTimezone: true, mode: "date" }),
+    cancelledAt: timestamp("cancelled_at", { withTimezone: true, mode: "date" }),
+    /** Platform billing reference — separate from tenant accounting (PLATFORM_ADMIN §1.2). */
+    invoiceRef: varchar("invoice_ref", { length: 120 }),
+    notes: text("notes"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex("subscriptions_tenant_uq").on(t.tenantId),
+    index("subscriptions_status_idx").on(t.status),
+  ],
+);
+
+/** Global (tenant_id null) or per-tenant flags; every change is audited. */
+export const featureFlags = pgTable(
+  "feature_flags",
+  {
+    id: id(),
+    scope: varchar("scope", { length: 10 }).notNull(), // 'global' | 'tenant'
+    tenantId: uuid("tenant_id").references(() => tenants.id, { onDelete: "cascade" }),
+    key: varchar("key", { length: 60 }).notNull(),
+    enabled: boolean("enabled").notNull().default(false),
+    note: text("note"),
+    updatedByLabel: varchar("updated_by_label", { length: 250 }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex("feature_flags_global_uq")
+      .on(t.key)
+      .where(sql`${t.tenantId} is null`),
+    uniqueIndex("feature_flags_tenant_uq")
+      .on(t.tenantId, t.key)
+      .where(sql`${t.tenantId} is not null`),
+    index("feature_flags_tenant_idx").on(t.tenantId),
+  ],
+);
+
+/** Usage samples per tenant/period — counts only, never document content. */
+export const usageMetrics = pgTable(
+  "usage_metrics",
+  {
+    id: id(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    metric: varchar("metric", { length: 60 }).notNull(),
+    period: varchar("period", { length: 10 }).notNull(), // YYYY-MM (monthly) or YYYY-MM-DD (daily)
+    value: numeric("value", { precision: 18, scale: 3 }).notNull().default("0"),
+    capturedAt: timestamp("captured_at", { withTimezone: true, mode: "date" })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("usage_metrics_uq").on(t.tenantId, t.metric, t.period),
+    index("usage_metrics_tenant_idx").on(t.tenantId),
+  ],
+);
+
+/** Break-glass support grants (PLATFORM_ADMIN §2): two-person, scoped, time-boxed. */
+export const supportGrants = pgTable(
+  "support_grants",
+  {
+    id: id(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    requestedByPlatformUserId: uuid("requested_by_platform_user_id").references(
+      () => platformUsers.id,
+      { onDelete: "set null" },
+    ),
+    platformApprovedByPlatformUserId: uuid("platform_approved_by_platform_user_id").references(
+      () => platformUsers.id,
+      { onDelete: "set null" },
+    ),
+    tenantApprovedByUserId: uuid("tenant_approved_by_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    scope: jsonb("scope")
+      .$type<{ screens?: string[]; amounts?: boolean; exports?: boolean }>()
+      .notNull()
+      .default({}),
+    reason: text("reason").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true, mode: "date" }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true, mode: "date" }),
+    revokedReason: text("revoked_reason"),
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true, mode: "date" }),
+    useCount: integer("use_count").notNull().default(0),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("support_grants_tenant_idx").on(t.tenantId),
+    index("support_grants_expiry_idx").on(t.expiresAt),
+  ],
+);
+
+/** Platform audit log (PLATFORM_ADMIN §3): append-only, hash-chained. */
+export const platformAuditLog = pgTable(
+  "platform_audit_log",
+  {
+    id: id(),
+    actorPlatformUserId: uuid("actor_platform_user_id").references(() => platformUsers.id, {
+      onDelete: "set null",
+    }),
+    actorLabel: varchar("actor_label", { length: 250 }).notNull(),
+    action: varchar("action", { length: 120 }).notNull(),
+    entity: varchar("entity", { length: 80 }),
+    entityId: varchar("entity_id", { length: 120 }),
+    before: jsonb("before").$type<unknown>(),
+    after: jsonb("after").$type<unknown>(),
+    ip: varchar("ip", { length: 60 }),
+    userAgent: text("user_agent"),
+    at: timestamp("at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
+    prevHash: varchar("prev_hash", { length: 64 }),
+    hash: varchar("hash", { length: 64 }).notNull(),
+  },
+  (t) => [index("platform_audit_at_idx").on(t.at), index("platform_audit_action_idx").on(t.action)],
+);
+
+/** Key/value platform settings (drive folder, retention policy, cooling-off days…). */
+export const platformSettings = pgTable("platform_settings", {
+  key: varchar("key", { length: 80 }).primaryKey(),
+  value: jsonb("value").$type<unknown>().notNull(),
+  updatedAt: updatedAt(),
+  updatedByLabel: varchar("updated_by_label", { length: 250 }),
+});
+
+/** Backup run metadata (BACKUP_AND_RECOVERY §3): one row per attempt. */
+export const backupRuns = pgTable(
+  "backup_runs",
+  {
+    id: id(),
+    kind: backupKind("kind").notNull().default("scheduled"),
+    status: backupStatus("status").notNull().default("running"),
+    /** 'pg_dump-custom' (D-014 production path) or 'logical-json' (portable fallback). */
+    format: varchar("format", { length: 24 }).notNull(),
+    databaseName: varchar("database_name", { length: 120 }).notNull(),
+    engineVersion: varchar("engine_version", { length: 120 }),
+    startedAt: timestamp("started_at", { withTimezone: true, mode: "date" })
+      .notNull()
+      .defaultNow(),
+    finishedAt: timestamp("finished_at", { withTimezone: true, mode: "date" }),
+    durationMs: integer("duration_ms"),
+    plaintextBytes: bigint("plaintext_bytes", { mode: "number" }),
+    artifactBytes: bigint("artifact_bytes", { mode: "number" }),
+    plaintextSha256: varchar("plaintext_sha256", { length: 64 }),
+    artifactSha256: varchar("artifact_sha256", { length: 64 }),
+    artifactPath: text("artifact_path"),
+    remoteId: text("remote_id"),
+    remoteProvider: varchar("remote_provider", { length: 40 }),
+    remoteVerifiedAt: timestamp("remote_verified_at", { withTimezone: true, mode: "date" }),
+    retentionClass: retentionClass("retention_class").notNull().default("latest"),
+    tableStats: jsonb("table_stats").$type<Record<string, { rows: number; sha256?: string }>>(),
+    errorClass: varchar("error_class", { length: 40 }),
+    errorDetail: text("error_detail"),
+    attempts: integer("attempts").notNull().default(0),
+    createdByLabel: varchar("created_by_label", { length: 250 }),
+    /** restore-drill evidence (BACKUP_AND_RECOVERY §5) */
+    drillAt: timestamp("drill_at", { withTimezone: true, mode: "date" }),
+    drillStatus: varchar("drill_status", { length: 20 }),
+    drillDetail: jsonb("drill_detail").$type<unknown>(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("backup_runs_status_idx").on(t.status, t.startedAt),
+    index("backup_runs_started_idx").on(t.startedAt),
+  ],
+);
+
+/** Alerts inbox (PLATFORM_ADMIN §1.4) — deduplicated by kind + tenant. */
+export const platformAlerts = pgTable(
+  "platform_alerts",
+  {
+    id: id(),
+    severity: alertSeverity("severity").notNull().default("warning"),
+    kind: varchar("kind", { length: 60 }).notNull(),
+    tenantId: uuid("tenant_id").references(() => tenants.id, { onDelete: "cascade" }),
+    title: varchar("title", { length: 250 }).notNull(),
+    body: text("body"),
+    payload: jsonb("payload").$type<Record<string, unknown>>(),
+    status: alertStatus("status").notNull().default("open"),
+    occurrences: integer("occurrences").notNull().default(1),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true, mode: "date" })
+      .notNull()
+      .defaultNow(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true, mode: "date" })
+      .notNull()
+      .defaultNow(),
+    acknowledgedByPlatformUserId: uuid("acknowledged_by_platform_user_id").references(
+      () => platformUsers.id,
+      { onDelete: "set null" },
+    ),
+    acknowledgedAt: timestamp("acknowledged_at", { withTimezone: true, mode: "date" }),
+    resolvedAt: timestamp("resolved_at", { withTimezone: true, mode: "date" }),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("platform_alerts_status_idx").on(t.status, t.severity),
+    index("platform_alerts_kind_idx").on(t.kind, t.tenantId),
+  ],
+);
+
+/** Fixed-window rate limiting (PLATFORM_ADMIN §4). */
+export const rateLimits = pgTable("rate_limits", {
+  bucket: varchar("bucket", { length: 200 }).primaryKey(),
+  windowStart: timestamp("window_start", { withTimezone: true, mode: "date" })
+    .notNull()
+    .defaultNow(),
+  count: integer("count").notNull().default(0),
+});
+
+/** Tenant export bundles (BACKUP_AND_RECOVERY §8) — one tenant, expiring link. */
+export const tenantExports = pgTable(
+  "tenant_exports",
+  {
+    id: id(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    status: exportStatus("status").notNull().default("queued"),
+    format: varchar("format", { length: 24 }).notNull().default("json+csv"),
+    manifest: jsonb("manifest").$type<{
+      tables?: { name: string; rows: number; sha256?: string }[];
+      generatedAt?: string;
+      version?: number;
+    }>(),
+    artifactPath: text("artifact_path"),
+    bytes: bigint("bytes", { mode: "number" }),
+    sha256: varchar("sha256", { length: 64 }),
+    downloadTokenHash: varchar("download_token_hash", { length: 64 }),
+    expiresAt: timestamp("expires_at", { withTimezone: true, mode: "date" }),
+    requestedByUserId: uuid("requested_by_user_id"),
+    requestedByPlatformUserId: uuid("requested_by_platform_user_id"),
+    requestedByLabel: varchar("requested_by_label", { length: 250 }),
+    downloadedAt: timestamp("downloaded_at", { withTimezone: true, mode: "date" }),
+    errorClass: varchar("error_class", { length: 40 }),
+    errorDetail: text("error_detail"),
+    createdAt: createdAt(),
+    finishedAt: timestamp("finished_at", { withTimezone: true, mode: "date" }),
+  },
+  (t) => [
+    index("tenant_exports_tenant_idx").on(t.tenantId, t.createdAt),
+    index("tenant_exports_status_idx").on(t.status),
+  ],
+);
+
+/** Deletion workflow (PLATFORM_ADMIN §5): request → cooling off → purge + certificate. */
+export const deletionRequests = pgTable(
+  "deletion_requests",
+  {
+    id: id(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "restrict" }),
+    status: deletionStatus("status").notNull().default("requested"),
+    reason: text("reason"),
+    requestedByLabel: varchar("requested_by_label", { length: 250 }).notNull(),
+    exportOffered: boolean("export_offered").notNull().default(false),
+    exportId: uuid("export_id").references(() => tenantExports.id, { onDelete: "set null" }),
+    coolingOffUntil: timestamp("cooling_off_until", { withTimezone: true, mode: "date" }),
+    legalHold: boolean("legal_hold").notNull().default(false),
+    legalHoldNote: text("legal_hold_note"),
+    approvedByPlatformUserId: uuid("approved_by_platform_user_id").references(
+      () => platformUsers.id,
+      { onDelete: "set null" },
+    ),
+    safetyBackupId: uuid("safety_backup_id").references(() => backupRuns.id, {
+      onDelete: "set null",
+    }),
+    purgedAt: timestamp("purged_at", { withTimezone: true, mode: "date" }),
+    certificate: jsonb("certificate").$type<unknown>(),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [index("deletion_requests_status_idx").on(t.status)],
+);
+
 export const schema = {
   tenants,
   companies,
@@ -1693,6 +2052,18 @@ export const schema = {
   productionOutputs,
   productionCostComponents,
   // phase 6 — tax / e-invoicing
+  plans,
+  subscriptions,
+  featureFlags,
+  usageMetrics,
+  supportGrants,
+  platformAuditLog,
+  platformSettings,
+  backupRuns,
+  platformAlerts,
+  rateLimits,
+  tenantExports,
+  deletionRequests,
   taxConfigs,
   zatcaCertificates,
   invoiceChains,
@@ -1722,4 +2093,12 @@ export const schema = {
   productionStatus,
   zatcaEnvironment,
   submissionStatusFlow,
+  subscriptionStatus,
+  alertSeverity,
+  alertStatus,
+  backupKind,
+  backupStatus,
+  retentionClass,
+  exportStatus,
+  deletionStatus,
 };

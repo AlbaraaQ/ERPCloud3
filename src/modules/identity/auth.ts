@@ -7,7 +7,7 @@
 
 import { cache } from "react";
 import { cookies } from "next/headers";
-import { createHash, randomBytes, timingSafeEqual } from "crypto";
+import { generateSessionToken, hashToken, tokensEqual } from "./tokens";
 import { SESSION_COOKIE } from "./constants";
 import * as argon2 from "argon2";
 import type { HashOptions } from "argon2";
@@ -43,13 +43,8 @@ export async function verifyPassword(hash: string, password: string): Promise<bo
 }
 
 /* ------------------------------------------------------------------- sessions */
-export function generateSessionToken(): string {
-  return randomBytes(32).toString("base64url");
-}
-
-export function hashToken(token: string): string {
-  return createHash("sha256").update(token, "utf8").digest("hex");
-}
+// Token primitives live in ./tokens (Node-only, reusable by the platform tier).
+export { generateSessionToken, hashToken, tokensEqual };
 
 export interface CreateSessionArgs {
   userId?: string | null;
@@ -175,9 +170,3 @@ export const getSessionContext = cache(async (): Promise<SessionContext | null> 
   return buildContextByToken(token);
 });
 
-/** Cookie payload for comparisons (timing-safe where it matters). */
-export function tokensEqual(a: string, b: string): boolean {
-  const ba = Buffer.from(a);
-  const bb = Buffer.from(b);
-  return ba.length === bb.length && timingSafeEqual(ba, bb);
-}

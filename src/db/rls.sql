@@ -498,3 +498,112 @@ drop trigger if exists trg_production_immutable on public.production_orders;
 create trigger trg_production_immutable
   before update or delete on public.production_orders
   for each row execute function public.check_production_mutable();
+
+-- ============================================================================
+-- Phase 8: platform administration (PLATFORM_ADMIN.md, BACKUP_AND_RECOVERY.md)
+--   * read-only enforcement for suspended/deactivated tenants (defense in depth)
+--   * hash-chained platform audit log (separate chain from tenants)
+-- Platform-owned tables (plans, subscriptions, feature_flags, usage_metrics,
+-- support_grants, platform_audit_log, platform_settings, backup_runs,
+-- platform_alerts, rate_limits, tenant_exports, deletion_requests) are
+-- deliberately NOT tenant-scoped and hold no tenant financial content; they are
+-- reachable only through the platform session namespace (/platform) and every
+-- mutation is written to platform_audit_log.
+-- ============================================================================
+
+-- Read-only mode flag, set per transaction by the application when the tenant
+-- is not active (suspended/deactivated ⇒ read-only + export, never destructive).
+create or replace function public.app_read_only() returns boolean
+language sql stable as $$
+  select coalesce(nullif(current_setting('app.read_only', true), ''), 'off') in ('on', 'true', '1')
+$$;
+
+-- Restrictive policies: they AND with the permissive tenant policies, so a
+-- read-only session keeps full read visibility but cannot INSERT/UPDATE/DELETE.
+-- audit_log is intentionally exempt: a blocked attempt must still be auditable.
+do $$
+declare
+  t text;
+begin
+  for t in
+    select c.relname
+    from pg_class c
+    join pg_namespace n on n.oid = c.relnamespace
+    where n.nspname = 'public' and c.relkind = 'r' and c.relname <> 'audit_log'
+      and exists (
+        select 1 from information_schema.columns col
+        where col.table_schema = 'public' and col.table_name = c.relname
+          and col.column_name = 'tenant_id'
+      )
+      and exists (
+        select 1 from pg_policies p
+        where p.schemaname = 'public' and p.tablename = c.relname
+          and p.policyname = 'tenant_isolation'
+      )
+  loop
+    execute format('drop policy if exists tenant_readonly_insert on public.%I', t);
+    execute format(
+      'create policy tenant_readonly_insert on public.%I as restrictive for insert with check (not public.app_read_only())',
+      t
+    );
+    execute format('drop policy if exists tenant_readonly_update on public.%I', t);
+    execute format(
+      'create policy tenant_readonly_update on public.%I as restrictive for update using (not public.app_read_only()) with check (not public.app_read_only())',
+      t
+    );
+    execute format('drop policy if exists tenant_readonly_delete on public.%I', t);
+    execute format(
+      'create policy tenant_readonly_delete on public.%I as restrictive for delete using (not public.app_read_only())',
+      t
+    );
+  end loop;
+end $$;
+
+-- Platform audit chain (PLATFORM_ADMIN §3) — append-only, per-platform chain.
+create or replace function public.write_platform_audit(
+  p_id uuid,
+  p_actor_platform_user_id uuid,
+  p_actor_label text,
+  p_action text,
+  p_entity text,
+  p_entity_id text,
+  p_before jsonb,
+  p_after jsonb,
+  p_ip text,
+  p_user_agent text
+) returns uuid
+language plpgsql security definer
+set search_path = public
+as $$
+declare
+  v_prev text;
+  v_hash text;
+begin
+  perform pg_advisory_xact_lock(hashtextextended('platform_audit', 0));
+
+  select a.hash into v_prev
+  from public.platform_audit_log a
+  order by a.at desc, a.id desc
+  limit 1;
+
+  v_hash := encode(digest(
+    coalesce(v_prev, '') || '|' ||
+    coalesce(p_actor_label, '') || '|' || p_action || '|' ||
+    coalesce(p_entity, '') || '|' || coalesce(p_entity_id, '') || '|' ||
+    coalesce(p_after::text, '') || '|' || clock_timestamp()::text,
+    'sha256'
+  ), 'hex');
+
+  insert into public.platform_audit_log (
+    id, actor_platform_user_id, actor_label, action, entity, entity_id,
+    "before", "after", ip, user_agent, prev_hash, hash
+  ) values (
+    p_id, p_actor_platform_user_id, p_actor_label, p_action, p_entity, p_entity_id,
+    p_before, p_after, p_ip, p_user_agent, v_prev, v_hash
+  );
+
+  return p_id;
+end;
+$$;
+
+revoke update, delete on public.platform_audit_log from public;
