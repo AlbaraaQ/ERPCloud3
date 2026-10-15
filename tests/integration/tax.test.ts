@@ -254,6 +254,61 @@ describe.skipIf(!DB)("tax — zatca submission engine", () => {
     expect(await scalar(sql`select tax_status from sales_invoices where id = ${inv.invoiceId}`)).toBe("local_draft");
   });
 
+  it("exempt and zero-rated lines require the tenant ruling — never a silent exemption", async () => {
+    const { createAndPostInvoice } = await import("@/modules/sales/invoices");
+    const { receiveStock } = await import("@/modules/inventory/stock");
+    const { isDomainError } = await import("@/modules/shared/result");
+
+    await db.execute(sql`
+      insert into products (id, tenant_id, sku, name_ar, stock_unit_id, tax_category, sale_price)
+      values (${newId()}, ${tenantA}, ${"TAXE-" + RUN}, 'خدمة معفاة تأمين', ${unitEa}, 'exempt', '25.00')
+    `);
+    const exemptProduct = await scalar(sql`select id from products where tenant_id = ${tenantA} and sku = ${"TAXE-" + RUN}`);
+    await withTenant(tenantA, (trx) =>
+      receiveStock(trx, ctx(), {
+        warehouseId: mainWh, productId: exemptProduct, qty: "10", unitCost: "10.00",
+        businessDate: TODAY, sourceType: "test", sourceId: newId(), effectKind: `recv-taxe-${RUN}`, lineRef: RUN,
+      }),
+    );
+
+    const draft = () => ({
+      customerId: vatCustomerId, warehouseId: mainWh, businessDate: TODAY, isCredit: true,
+      lines: [{ productId: exemptProduct, qtyBase: "1" }],
+    });
+
+    // 1. no exemption ruling configured → the document is refused, not silently exempt
+    const blocked = await withTenant(tenantA, (trx) => createAndPostInvoice(trx, ctx(), draft(), false)).catch((e) => e);
+    expect(isDomainError(blocked)).toBe(true);
+    expect((blocked as { messageKey: string }).messageKey).toBe("errors.exemptionReasonMissing");
+
+    // 2. tenant rules the supply exempt under Article 29 (life insurance) → line-level E
+    await db.execute(sql`
+      update tax_configs set exemption_reasons = ${JSON.stringify({ exempt: "VATEX-SA-29-7" })}::jsonb
+      where tenant_id = ${tenantA}
+    `);
+    try {
+      const inv = await withTenant(tenantA, (trx) => createAndPostInvoice(trx, ctx(), draft(), false));
+      const sub = (
+        (await db.execute(sql`select * from invoice_submissions where invoice_id = ${inv.invoiceId}`)) as unknown as {
+          rows: Record<string, unknown>[];
+        }
+      ).rows[0];
+      const xml = String(sub.xml);
+      expect(sub.status).toBe("clearance_pending");
+      // the line carries its own category, the document-level subtotal the approved pair
+      const lineBlock = /<cac:InvoiceLine>[\s\S]*?<\/cac:InvoiceLine>/.exec(xml)![0];
+      expect(lineBlock).toContain("<cbc:ID>E</cbc:ID>");
+      expect(xml).toContain("<cbc:TaxExemptionReasonCode>VATEX-SA-29-7</cbc:TaxExemptionReasonCode>");
+      expect(xml).toContain(
+        "<cbc:TaxExemptionReason>Life insurance services mentioned in Article 29 of the VAT Regulations</cbc:TaxExemptionReason>",
+      );
+      // zero VAT, and the exempt line contributes no tax to the totals
+      expect(xml).toContain('<cbc:TaxAmount currencyID="SAR">0.00</cbc:TaxAmount>');
+    } finally {
+      await db.execute(sql`update tax_configs set exemption_reasons = null where tenant_id = ${tenantA}`);
+    }
+  });
+
   it("processing via gated mock transport: reported/cleared, mirrors invoice, retry same uuid/icv", async () => {
     process.env.ZATCA_TRANSPORT = "mock";
     const { processPendingSubmissions, retrySubmission } = await import("@/modules/tax/processor");

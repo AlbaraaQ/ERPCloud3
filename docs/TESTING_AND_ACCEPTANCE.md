@@ -27,6 +27,12 @@ integration → `next build`. E2E before releases. Coverage target ≥ 80% lines
 - ZATCA: **sandbox environment only**, and only when official credentials exist;
   otherwise the adapter is covered by contract fakes and skipped-credential tests are
   marked as environment-limited (not "passed").
+- Engine limits also mark tests instead of letting them mislead: `isSharedSessionEngine()`
+  (tests/helpers/db-engine.ts) detects a DB engine that serves every logical connection
+  from ONE backend session (the sandbox's PGlite gateway). Savepoint/rollback semantics
+  leak across connections there and role switching is a no-op, so the idempotent-replay,
+  concurrency and RLS suites report **skipped** on that engine and run for real against
+  a normal PostgreSQL server.
 
 ## 3. Acceptance scenarios (AC-ID → requirement refs)
 
@@ -56,7 +62,7 @@ integration → `next build`. E2E before releases. Coverage target ≥ 80% lines
 | AC-022 | Scrap (normal/absnormal) → correct accounts, no double-count; variance closes order | int | FR-026, P-20…22 |
 | AC-023 | Lot genealogy: raw lot → batch → customer invoice; recall query complete | int | FR-027 |
 | AC-024 | Invoice states: draft ≠ posted; returns capped; rejected → correction; reversed docs preserved | int+e2e | FR-034/035, INV-10/11 |
-| AC-025 | ZATCA sandbox: onboarding → clearance (standard) → reporting (simplified) → forced failure → retry without duplicate issuance | int (env-limited) | FR-071 |
+| AC-025 | ZATCA sandbox: onboarding → clearance (standard) → reporting (simplified) → forced failure → retry without duplicate issuance | int (env-limited — see §3.1) | FR-071 |
 | AC-026 | Tax failure path: doc preserved with exact status; no fabricated stamp; Arabic diagnostics | int (fake adapter) | IZ §5 |
 | AC-027 | Date boundaries: month-end across tenant TZ; business_date correctness | unit+int | D-016, INV-14 |
 | AC-028 | Tenant isolation: cross-tenant read/write attempts fail at service + RLS level | sec | INV-16, SEC §2 |
@@ -68,6 +74,44 @@ integration → `next build`. E2E before releases. Coverage target ≥ 80% lines
 | AC-034 | Rep offline limits enforced (count/value/credit/age) with correct block UX | int+e2e | FR-054, OS §6 |
 | AC-035 | Reprint does not mutate doc/timestamps; copies labeled; draft watermark | unit+e2e | INV-12, IZ §8 |
 | AC-036 | Session/device: expiry, revocation blocks sync, audit events present | api | SEC §3/§7 |
+
+### 3.1 AC-025 — ZATCA end-to-end, recorded honestly
+
+**Status: implemented, not release-claimed.** This sandbox has no ZATCA credentials and
+credentials cannot be created here (an OTP comes from the taxpayer's own FATOORA portal
+account, and the portal requires a real CR/VAT registration). Nothing about the real
+exchange is therefore asserted as verified — and nothing is faked to make it look verified
+(D-012).
+
+What *is* demonstrated here (re-runnable):
+
+| Evidence | Command | Result |
+|---|---|---|
+| Onboarding chain: CSR → compliance CSID → the six mandatory compliance documents → production CSID → renewal, with credentials that actually sign | `npx vitest run tests/integration/zatca-onboarding.test.ts` | 5/5 |
+| Compliance documents: fixed platform order (standard I/credit/debit → simplified I/credit/debit), per-run ICV `1…6`, PIH chain (genesis → each doc links to its predecessor), each document self-verified (`digestValid`/`signedPropertiesValid`/`certificateDigestValid`/`signatureValid`) before submission | same suite | — |
+| Guards: production CSID refused until all six checks passed; invalid OTP / invalid CSR issue nothing; unsigned or naked documents are rejected by the contract fake instead of being rubber-stamped | same suite | — |
+| Submission engine: classification, signed XML, real secp256k1 signatures, TLV QR whose tag 8 (SPKI DER, 88 bytes) and tag 9 (certificate signature) match the X.509 certificate, ICV/PIH chain, clearance vs reporting state machine, retry that preserves uuid/ICV/XML | `npx vitest run tests/integration/tax.test.ts` | 7/7 |
+| No fabricated success: tax disabled, missing device key, incomplete seller identity and an incomplete Saudi buyer address all end in `blocked_config` (+ `local_draft` mirror) or a blocking `ConfigurationError` | tax suite | — |
+
+The contract fake is `MockTransport`, gated on `ZATCA_TRANSPORT=mock` or `NODE_ENV=test`
+(`transportFor()` refuses to fall back to it otherwise). It issues a **real X.509
+certificate** from the local EGS CA so the signing path is exercised cryptographically;
+it never claims to be ZATCA. The SDK's published sample documents are used as the format
+reference for the fixtures.
+
+What remains unverified — and must be recorded as such until it changes:
+
+1. The real `gw-fatoora.zatca.gov.sa` exchange (developer-portal → simulation → core) —
+   requires an OTP + CSID from a registered taxpayer.
+2. Platform behaviour under real rejection payloads/rate limits, and the exact
+   `validationResults` wording.
+3. Clearance of a real standard invoice (`CLEARED` + stamped XML) and reporting of a real
+   simplified invoice (`REPORTED`).
+
+Exit condition to close AC-025: with official sandbox credentials available, run the same
+scenarios against `ZATCA_TRANSPORT` unset (HTTP transport) and record command + result in
+`docs/PROGRESS.md`. Until then this row is *environment-limited*, never "passed", and no
+production-compliance claim is made anywhere in the docs or UI.
 
 **Chaos fixture** (shared): seeded tenant with sales/returns/reversals/free goods/
 transfers/partial receipts/discrepancies/expenses/settlement exceptions/production runs —

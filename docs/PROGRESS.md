@@ -6,6 +6,105 @@ exactly as observed.
 
 ---
 
+## Session 8 — 2026-10-16 · Phase 6 COMPLETE (onboarding automation + final XML details) → Phase 7 next
+
+### Status: Phase 6 COMPLETE ✅ (AC-025 recorded as environment-limited, not "passed")
+> **Compliance framing (binding, unchanged):** sandbox-validated architecture ONLY. Not
+> production-certified, not legally compliant by association. No FATOORA sandbox
+> credentials exist in this environment and none were fabricated; the real portal
+> exchange is **unverified** and AC-025 says so explicitly (TESTING §3.1).
+
+### Work completed
+
+1. **Onboarding automation (the step that used to be a documented manual capture)** —
+   `src/modules/tax/onboarding.ts` + four server actions + `/tax` `OnboardingPanel`:
+   EGS key pair + CSR (official SDK property set/OIDs, template per environment) →
+   `POST /compliance` with the portal OTP → the **six mandatory compliance documents in
+   platform order** (standard I/credit/debit → simplified I/credit/debit, 100.00 net at
+   15%) → `POST /production/csids` → `PATCH /production/csids` renewal, with the whole
+   run journaled (`zatca_compliance_checks`: icv, previous_hash, xml, qr, attempts,
+   validation status) and a read model feeding the UI. Guard: the production CSID is
+   refused until all six kinds have a `passed` row (`errors.taxComplianceChecksIncomplete`
+   with the missing kinds). Manual credential capture survives as a settings-only
+   fallback (`t.taxPg.manualFallback`).
+2. **Real cryptography in the credential path** — the gated contract fake issues an
+   ACTUAL X.509 certificate from the local EGS CA (`local-ca.ts`), persists the key pair
+   it certifies, and every compliance document is self-verified
+   (`digestValid`/`signedPropertiesValid`/`certificateDigestValid`/`signatureValid`)
+   before submission. No fake tokens, no fabricated acceptance: the fake refuses unsigned
+   or naked documents and returns FAIL.
+3. **Final XML details closed with the compliance cycle** — Delivery/ActualDeliveryDate
+   and the PaymentMeansCode table were already rule-keyed; this session closed the
+   decimal-precision and category work: BR-KSA-DEC-01..05 now evaluate the **emitted
+   document** (in-memory money buffers legitimately carry more places), BR-KSA-CL-05
+   enforces the *approved* KSA exemption text for the chosen code (not merely presence),
+   and line-level Z/E/O are covered end-to-end (`E` line + subtotal pair from the tenant
+   ruling; `O` line without `cbc:Percent`, matching the SDK samples; absent tenant
+   ruling = blocking `ConfigurationError`, never a silent exemption).
+4. **Test hygiene that was hiding real signal**:
+   - `vansales` `balance()` helper asserted a stock-balance row that does not exist yet
+     (fresh custody warehouse) → tolerant query; the 5 chronic failures were the helper,
+     not the app.
+   - `isSharedSessionEngine()` (tests/helpers/db-engine.ts) detects a DB engine that
+     serves every logical connection from ONE backend session (the sandbox PGlite
+     gateway). Savepoint/rollback leak across connections and role switching is a no-op
+     there, so the idempotent-replay/concurrency and RLS suites now report **skipped**
+     with a documented reason and run for real against a normal PostgreSQL server.
+   - `tests/unit/tax-i18n.test.ts` collects every `errors.*`/`taxPg.*`/`tax.validation.*`
+     key from the source and asserts it resolves in BOTH dictionaries (45 validator keys
+     had no translation at all before this session).
+   - `npm test` / `npm run test:unit` scripts added (`vitest run --no-file-parallelism`).
+
+### Commands executed → results
+
+| Command | Result |
+|---------|--------|
+| `node scripts/dev-postgres.mjs --port 5432 --dir /tmp/pglite-data --max-connections 80` | ✓ live (PID 2274) |
+| `node scripts/db-reset.mjs` (×3) | ✓ drop schema → drizzle push → rls.sql → seed |
+| `npx next typegen` / `npm run lint` / `npx tsc --noEmit` / `npm run build` | ✓ all green (build 12.5 s compile) |
+| `npm test` (fresh DB) | ✓ **97 passed / 8 skipped / 0 failed** (13 files; skips = PGlite engine limits) |
+| `npx vitest run tests/integration/zatca-onboarding.test.ts` | ✓ 5/5 — full CSR→compliance→pCSID→renewal cycle, PIH chain, guards, no-credential-leak status |
+| `npx vitest run tests/integration/tax.test.ts` | ✓ 8/8 — incl. QR tag 8/9 cross-checked against the X.509 certificate, BR-KSA-63 no-fabrication, exempt-line ruling |
+| `npx vitest run tests/unit/zatca-signature.test.ts` | ✓ 15/15 — incl. mixed S/Z/E/O line document and CL-04/CL-05 pairing |
+| `openssl x509 -inform DER` / `openssl req -inform DER` (probe) | ✓ generated EGS certificate + CSR parse (secp256k1, TSTZATCA-Code-Signing) |
+
+### Incidents fixed with lasting rules
+
+- **Validator false positive (was putting real submissions into `blocked_config`)**: the
+  line-precision rule rejected the in-memory `lineNet` buffer (legitimately > 2 decimals)
+  while BR-KSA-DEC-03 governs the *document's* `TaxTotal/cbc:TaxAmount`. Rule of thumb
+  adopted: **document rules read the rendered XML; buffers are not evidence.**
+- **BR-KSA-50 unit mismatch**: `vatRate` is the UBL percent value ("15"), so line VAT =
+  `round2(lineNet × vatRate / 100)` — the old fraction assumption blocked every taxed
+  line. The category-with-positive-rate guard is our own rule (`HISAB-CAT-RATE`), not a
+  mis-cited DEC-02.
+- **QR tag 8 is X.509 SPKI DER (88 bytes for secp256k1), not the raw 65-byte point**, and
+  tag 9 is the certificate's own signature. Proven from the SDK samples
+  (`Standard/Simplified_Invoice.xml`) and now cross-checked against the certificate in
+  the integration suite.
+- **PGlite is single-backend**: it also explains the intermittent
+  `Received unexpected commandComplete message from backend` and the run-to-run
+  accounting/RLS failures. Re-run before diagnosing, and mark — do not "fix" the app.
+
+### Residuals (explicit, gating)
+
+- **Sandbox FATOORA end-to-end** (developer-portal → simulation → core) stays unverified:
+  requires an OTP + CSID from a registered taxpayer. AC-025 exit condition recorded
+  (TESTING §3.1); no production-compliance claim anywhere.
+- Compliance-run PIH/ICV chain restarts from genesis per run (`COMP-*` fixtures) — the
+  production chain starts from the first real document (by design, documented).
+- SignedProperties c14n context vs the SDK sample digest still open (the sample's own
+  Reference uses absolute `URI=""`, undereferenceable by `xml-crypto`); our generated
+  documents verify completely.
+- OQ-2/OQ-3/OQ-4 remain OPEN legal inputs — no silent resolution in code.
+
+### Exact next step (Phase 7)
+
+Reporting & dashboards per REPORTING_SPECIFICATION.md: reports in priority order with
+formula-verification tests on the chaos fixture (incl. reversals) — every figure must
+reconcile with the authoritative ledgers, one source per figure, `business_date` filters,
+drafts excluded, reversals first-class (no double counting).
+
 ## Session 7 — 2026-10-15 · Phase 6 (electronic invoicing & ZATCA compliance)
 
 ### Status: Phase 6 PARTIAL — core complete; portal automation (CSR/compliance-checks) deferred

@@ -348,6 +348,165 @@ describe("KSA document framing", () => {
     expect(validateInvoiceXml(xml).filter((i) => i.severity === "error")).toEqual([]);
   });
 
+  it("line-level zero-rated / exempt / out-of-scope categories follow the SDK samples", () => {
+    const material = signingMaterial();
+    const xml = buildInvoiceXml({
+      invoiceNumber: "SI-6",
+      uuid: "8d487816-70b8-4ade-a618-9d620b738151",
+      icv: 6,
+      previousHashB64: initialPih(),
+      issueDate: "2026-01-07",
+      issueTime: "12:00:00",
+      docType: "standard",
+      docSubtype: "invoice",
+      currency: "SAR",
+      seller: SELLER,
+      buyer: BUYER,
+      deliveryDate: "2026-01-07",
+      paymentMeansCodes: ["10"],
+      netTotal: "400.00",
+      discountTotal: "0.00",
+      vatTotal: "15.00",
+      totalWithVat: "415.00",
+      taxSubtotals: [
+        { category: "S", rate: "15", taxable: "100.00", tax: "15.00" },
+        {
+          category: "Z",
+          rate: "0",
+          taxable: "100.00",
+          tax: "0.00",
+          exemptionReasonCode: "VATEX-SA-32",
+          exemptionReason: "Export of goods",
+        },
+        {
+          category: "E",
+          rate: "0",
+          taxable: "100.00",
+          tax: "0.00",
+          exemptionReasonCode: "VATEX-SA-29-7",
+          exemptionReason: "Life insurance services mentioned in Article 29 of the VAT Regulations",
+        },
+        {
+          category: "O",
+          rate: "0",
+          taxable: "100.00",
+          tax: "0.00",
+          exemptionReasonCode: "VATEX-EU-O",
+          exemptionReason: null,
+          includePercent: false,
+        },
+      ],
+      lines: [
+        { lineNo: 1, productName: "خاضع", qty: "1", unitCode: "PCE", unitPrice: "100.00", lineNet: "100.00", discountAmount: "0.00", vatRate: "15", vatAmount: "15.00", taxCategory: "S", free: false },
+        { lineNo: 2, productName: "صفرية التصدير", qty: "1", unitCode: "PCE", unitPrice: "100.00", lineNet: "100.00", discountAmount: "0.00", vatRate: "0", vatAmount: "0.00", taxCategory: "Z", free: false },
+        { lineNo: 3, productName: "معفاة تأمين", qty: "1", unitCode: "PCE", unitPrice: "100.00", lineNet: "100.00", discountAmount: "0.00", vatRate: "0", vatAmount: "0.00", taxCategory: "E", free: false },
+        { lineNo: 4, productName: "خارج النطاق", qty: "1", unitCode: "PCE", unitPrice: "100.00", lineNet: "100.00", discountAmount: "0.00", vatRate: "0", vatAmount: "0.00", taxCategory: "O", free: false },
+      ],
+      signature: { ...material, signingTimeIso: "2026-01-07T12:00:00Z" },
+    });
+
+    // every line declares its own category; only the standard line is taxed,
+    // and its VAT is net × rate/100 (BR-KSA-50 on the document, not a buffer)
+    const lineBlocks = [...xml.matchAll(/<cac:InvoiceLine>[\s\S]*?<\/cac:InvoiceLine>/g)].map((m) => m[0]);
+    expect(lineBlocks).toHaveLength(4);
+    expect(lineBlocks.map((b) => /<cbc:ID>([SEZO])<\/cbc:ID>/.exec(b)![1])).toEqual(["S", "Z", "E", "O"]);
+    expect(lineBlocks.map((b) => /<cbc:TaxAmount[^>]*>([\d.]+)</.exec(b)![1])).toEqual([
+      "15.00",
+      "0.00",
+      "0.00",
+      "0.00",
+    ]);
+    // Z/E keep <cbc:Percent>0.00</cbc:Percent>; out-of-scope omits it (SDK samples)
+    expect(lineBlocks[1]).toContain("<cbc:Percent>0.00</cbc:Percent>");
+    expect(lineBlocks[2]).toContain("<cbc:Percent>0.00</cbc:Percent>");
+    expect(lineBlocks[3]).not.toContain("<cbc:Percent>");
+    // the exemption pair lives on the document-level subtotal for its category
+    expect(buildInvoiceXml).toBeTypeOf("function");
+    expect(xml).toContain("<cbc:TaxExemptionReasonCode>VATEX-SA-32</cbc:TaxExemptionReasonCode>");
+    expect(xml).toContain("<cbc:TaxExemptionReasonCode>VATEX-SA-29-7</cbc:TaxExemptionReasonCode>");
+    expect(xml).toContain("Life insurance services mentioned in Article 29 of the VAT Regulations");
+    const oSubtotal = [...xml.matchAll(/<cac:TaxSubtotal>[\s\S]*?<\/cac:TaxSubtotal>/g)]
+      .map((m) => m[0])
+      .find((b) => b.includes("VATEX-EU-O"))!;
+    expect(oSubtotal).not.toContain("<cbc:Percent>");
+    expect(oSubtotal).not.toContain("<cbc:TaxExemptionReason>");
+    expect(validateInvoiceXml(xml, undefined).filter((i) => i.severity === "error")).toEqual([]);
+    // the hash recipe still holds for a mixed-category document
+    expect(computeInvoiceHash(xml).b64.length).toBeGreaterThan(40);
+  });
+
+  it("a zero-rated or exempt subtotal without its KSA exemption pair is an error (CL-04/CL-05)", () => {
+    const material = signingMaterial();
+    const base = {
+      invoiceNumber: "SI-7",
+      uuid: "8d487816-70b8-4ade-a618-9d620b738152",
+      icv: 7,
+      previousHashB64: initialPih(),
+      issueDate: "2026-01-07",
+      issueTime: "12:30:00",
+      docType: "simplified" as const,
+      docSubtype: "invoice" as const,
+      currency: "SAR",
+      seller: SELLER,
+      buyer: null,
+      deliveryDate: "2026-01-07",
+      paymentMeansCodes: ["10"],
+      netTotal: "100.00",
+      discountTotal: "0.00",
+      vatTotal: "0.00",
+      totalWithVat: "100.00",
+      lines: [],
+      signature: { ...material, signingTimeIso: "2026-01-07T12:30:00Z" },
+    };
+    // code present, text missing → CL-04 (a Z/E category must carry both)
+    const missingText = buildInvoiceXml({
+      ...base,
+      taxSubtotals: [
+        { category: "Z", rate: "0", taxable: "100.00", tax: "0.00", exemptionReasonCode: "VATEX-SA-32" },
+      ],
+    });
+    expect(validateInvoiceXml(missingText).some((i) => i.code === "BR-KSA-CL-04" && i.severity === "error")).toBe(true);
+
+    // neither code nor text — the category would otherwise read as silently exempt
+    const missingPair = buildInvoiceXml({
+      ...base,
+      taxSubtotals: [{ category: "E", rate: "0", taxable: "100.00", tax: "0.00" }],
+    });
+    expect(validateInvoiceXml(missingPair).some((i) => i.code === "BR-KSA-CL-04" && i.severity === "error")).toBe(true);
+
+    // code + text present but the text is not the approved KSA text for that code → CL-05
+    const wrongText = buildInvoiceXml({
+      ...base,
+      taxSubtotals: [
+        {
+          category: "Z",
+          rate: "0",
+          taxable: "100.00",
+          tax: "0.00",
+          exemptionReasonCode: "VATEX-SA-32",
+          exemptionReason: "Export of stuff",
+        },
+      ],
+    });
+    expect(validateInvoiceXml(wrongText).some((i) => i.code === "BR-KSA-CL-05" && i.severity === "error")).toBe(true);
+
+    // code from the other category is equally rejected
+    const wrongCategory = buildInvoiceXml({
+      ...base,
+      taxSubtotals: [
+        {
+          category: "Z",
+          rate: "0",
+          taxable: "100.00",
+          tax: "0.00",
+          exemptionReasonCode: "VATEX-SA-29-7",
+          exemptionReason: "Life insurance services mentioned in Article 29 of the VAT Regulations",
+        },
+      ],
+    });
+    expect(validateInvoiceXml(wrongCategory).some((i) => i.code === "BR-KSA-CL-05")).toBe(true);
+  });
+
   it("rejects a payment means code outside the allow-list (BR-KSA-16)", () => {
     const material = signingMaterial();
     const xml = buildInvoiceXml({

@@ -32,6 +32,7 @@ import {
   standardQr,
 } from "./signature";
 import {
+  exemptionByCode,
   resolveExemption,
   type ExemptionConfig,
   type TaxCategoryCode,
@@ -384,7 +385,13 @@ function renderUnsigned(input: InvoiceXmlInput): string {
     </cac:TaxTotal>
     <cac:Item>
       <cbc:Name>${esc(l.productName)}</cbc:Name>
-      ${classifiedTaxCategoryXml("      ", { category: l.taxCategory, rate: l.vatRate })}
+      ${classifiedTaxCategoryXml("      ", {
+        category: l.taxCategory,
+        rate: l.vatRate,
+        // official samples: an out-of-scope line carries no cbc:Percent
+        // (Zero_Rate/Exempt samples keep Percent 0.00; Out_Of_Scope omits it)
+        includePercent: l.taxCategory !== "O",
+      })}
     </cac:Item>
     <cac:Price>
       <cbc:PriceAmount currencyID="${currency}">${d2(l.unitPrice)}</cbc:PriceAmount>
@@ -662,7 +669,8 @@ export function validateInvoiceXml(xml: string, input?: InvoiceXmlInput): Valida
       err("KSA-10", "InstructionNote", "tax.validation.noteLength");
     }
   }
-  // BR-KSA-CL-04/05 — exemption code + text pairing
+  // BR-KSA-CL-04 — the Z/E categories must carry BOTH the reason code and text;
+  // BR-KSA-CL-05 — the text must be one of the approved KSA texts for that code
   for (const block of xml.matchAll(/<cac:TaxSubtotal>[\s\S]*?<\/cac:TaxSubtotal>/g)) {
     const cat = /<cbc:ID[^>]*>([SZEO])<\/cbc:ID>/.exec(block[0])?.[1];
     if (cat === "Z" || cat === "E") {
@@ -673,6 +681,10 @@ export function validateInvoiceXml(xml: string, input?: InvoiceXmlInput): Valida
       } else {
         if (code.length > 13) err("BT-121", "TaxExemptionReasonCode", "tax.validation.exemptionCodeTooLong");
         if (reason.length > 127) err("BT-120", "TaxExemptionReason", "tax.validation.exemptionReasonTooLong");
+        const approved = exemptionByCode(code);
+        if (!approved || approved.category !== cat || approved.text !== reason) {
+          err("BR-KSA-CL-05", `TaxCategory.${cat}`, "tax.validation.exemptionTextUnapproved", `${code}`);
+        }
       }
     }
   }

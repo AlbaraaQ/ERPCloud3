@@ -442,6 +442,7 @@ export const ar = {
       "buyerNameMissing": "اسم العميل إلزامي",
       "exemptionReasonTooLong": "نص سبب الإعفاء يجب ألا يتجاوز 127 حرفًا",
       "exemptionCodeTooLong": "رمز سبب الإعفاء غير مطابق للقائمة السعودية",
+      "exemptionTextUnapproved": "نص سبب الإعفاء يجب أن يطابق النص المعتمد للرمز المختار (BR-KSA-CL-05)",
       "exemptionPairMissing": "الفئتان Z/E تتطلبان رمز سبب إعفاء ونصًّا معتمدًا من القائمة السعودية",
       "itemNameTooLong": "اسم الصنف يتجاوز 127 حرفًا",
       "lineVatMismatch": "ضريبة السطر لا تساوي صافي السطر × النسبة ÷ 100",

@@ -444,6 +444,7 @@ export const en: Dict = {
       "buyerNameMissing": "Buyer name is mandatory",
       "exemptionReasonTooLong": "Exemption reason text must not exceed 127 characters",
       "exemptionCodeTooLong": "Exemption reason code is not one of the KSA codes",
+      "exemptionTextUnapproved": "The exemption reason text must match the approved KSA text for the chosen code (BR-KSA-CL-05)",
       "exemptionPairMissing": "Categories Z/E require an exemption reason code and an approved KSA text",
       "itemNameTooLong": "Item name exceeds 127 characters",
       "lineVatMismatch": "Line VAT must equal line net × rate ÷ 100",
