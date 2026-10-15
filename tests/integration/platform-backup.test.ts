@@ -53,8 +53,10 @@ describe.skipIf(!DB)("platform backups — capture, verify, restore drill, reten
       directory: dir,
     });
 
-    expect(result.status, `run ${result.id} failed: ${result.errorDetail ?? ""}`).toBe("verified");
+    // recorded before asserting: the remaining tests must operate on THIS run
+    // (and on nothing else) even if an assertion below fails
     runId = result.id;
+    expect(result.status, `run ${result.id} failed: ${result.errorDetail ?? ""}`).toBe("verified");
     // no pg_dump on this host ⇒ the logical format, and the row says so
     expect(["logical-json", "pg_dump-custom"]).toContain(result.format);
     expect(result.tables).toBeGreaterThan(20);
@@ -118,7 +120,14 @@ describe.skipIf(!DB)("platform backups — capture, verify, restore drill, reten
     expect(names).toContain("journal_balance");
     expect(names).toContain("tenant_partitioning");
     expect(names).toContain("row_sampling");
+    expect(names).toContain("referential_integrity");
     expect(result.invariants!.ok).toBe(true);
+
+    // the copy must be referentially closed: a snapshot whose foreign keys cannot
+    // be rebuilt is not a restorable database
+    const referential = result.invariants!.checks.find((c) => c.name === "referential_integrity")!;
+    expect(referential.skipped ?? false).toBe(false);
+    expect(referential.metrics?.foreignKeys).toBeGreaterThan(10);
 
     // evidence landed on the run row
     const row = await service.getBackupRun(runId);
@@ -144,22 +153,44 @@ describe.skipIf(!DB)("platform backups — capture, verify, restore drill, reten
     expect(live.rows[0]!.n).toBe(source.rows[0]!.n);
   }, 180_000);
 
-  it("a drill over a consistently-sabotaged snapshot still fails: the drill compares the copy with the live data", async () => {
+  it("a drill over a consistently-sabotaged snapshot still fails: the copy is checked against the values it claims to hold", async () => {
+    expect(runId, "the capture test must have recorded a run id").toBeTruthy();
     const row = (await service.getBackupRun(runId))!;
     const original = await readFile(row.artifactPath!);
     const { decryptArtifact, encryptArtifact } = await import("@/modules/platform/backup/crypto");
     const { sha256Hex } = await import("@/modules/shared/crypto");
 
     const file = snapshot.parseSnapshot(decryptArtifact(original.toString("utf8")));
-    // Empty ONE business table — and update its manifest entry so the snapshot is
-    // internally consistent (this is the case verifySnapshot alone cannot catch).
-    const victim = file.manifest.tables.find((t) => t.name === "sales_invoices")!;
-    expect(victim.rows).toBeGreaterThan(0);
-    file.data[victim.name] = [];
-    file.manifest.rowCount -= victim.rows;
-    victim.rows = 0;
-    victim.chunks = 0;
-    victim.sha256 = sha256Hex(""); // hash of "no chunks"
+    // Strip the tenant from ONE business row — and re-hash that table so the
+    // snapshot stays internally consistent (this is exactly the case
+    // verifySnapshot alone cannot catch: the bytes are intact, the data is not).
+    // Move ONE business row to the other tenant: the snapshot stays fully valid
+    // (every constraint, key and foreign key still holds, and it verifies against
+    // its own manifest) — yet the copy no longer holds the distribution it claims.
+    // A table is chosen whose constraints cannot collide on the move.
+    const tenantsInSnapshot = new Set<string>();
+    for (const chunk of file.data["tenants"] ?? []) {
+      for (const row of chunk as Record<string, unknown>[]) tenantsInSnapshot.add(String(row.id));
+    }
+    expect(tenantsInSnapshot.size, "at least two tenants are needed").toBeGreaterThan(1);
+
+    const victim = file.manifest.tables.find(
+      (t) =>
+        t.rows > 1 &&
+        t.columns.some((c) => c.name === "tenant_id") &&
+        !/^platform_|^backup_|^pgboss/.test(t.name) &&
+        !t.constraints.some((c) => /UNIQUE/i.test(c.def)) &&
+        !t.indexes.some((i) => /UNIQUE/i.test(i)),
+    )!;
+    expect(victim, "a move-safe tenant-scoped table is needed for this test").toBeTruthy();
+
+    const chunks = file.data[victim.name]!;
+    const allRows = chunks.flat() as Record<string, unknown>[];
+    const moved = allRows[0]!;
+    const from = String(moved.tenant_id);
+    const to = [...tenantsInSnapshot].find((t) => t !== from)!;
+    moved.tenant_id = to;
+    victim.sha256 = sha256Hex(chunks.map((c) => sha256Hex(JSON.stringify(c))).join(":"));
 
     // the snapshot now verifies against its own manifest …
     expect(snapshot.verifySnapshot(file).ok).toBe(true);
@@ -193,7 +224,9 @@ describe.skipIf(!DB)("platform backups — capture, verify, restore drill, reten
       expect(result.status).toBe("failed");
       const partitioning = result.invariants?.checks.find((c) => c.name === "tenant_partitioning");
       expect(partitioning?.ok).toBe(false);
-      expect(partitioning?.detail).toContain("sales_invoices");
+      // both tenants' captured counts no longer match the copy
+      expect(partitioning?.detail).toMatch(new RegExp(`${victim.name}: tenant [0-9a-f]{8} has`));
+      expect(partitioning?.detail).toContain("capture had");
 
       const alerts = (await db.execute(
         sql`select count(*)::int as n from platform_alerts where kind = 'restore_drill_failed' and status = 'open'`,

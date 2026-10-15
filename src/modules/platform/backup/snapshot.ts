@@ -48,6 +48,14 @@ export interface SnapshotTable {
 
 export interface SnapshotManifest {
   version: 1;
+  /**
+   * Per-tenant row counts for every tenant-scoped table, taken while the data was
+   * captured. The post-restore check compares the copy against *these* numbers
+   * rather than against the live database: a copy must reproduce the capture, and
+   * the live database is expected to have moved on since (otherwise a drill run a
+   * day later would "fail" for having a busier source).
+   */
+  tenantCounts?: Record<string, Record<string, number>>;
   format: "logical-json";
   database: string;
   engineVersion: string;
@@ -75,6 +83,17 @@ function isExcluded(table: string): boolean {
   return EXCLUDED_PREFIXES.some((p) => table.startsWith(p));
 }
 
+/** Platform-scoped tables carry tenant_id values that are not tenant ownership. */
+function isPlatformScopedCapture(table: string): boolean {
+  return (
+    table === "audit_log" ||
+    table === "sessions" ||
+    table === "usage_metrics" ||
+    table.startsWith("platform_") ||
+    table.startsWith("backup_")
+  );
+}
+
 function asTextType(type: string): boolean {
   return /^(numeric|double precision|real|money)/i.test(type);
 }
@@ -86,9 +105,9 @@ async function rows<T>(exec: Exec, query: ReturnType<typeof sql>): Promise<T[]> 
 
 /* ------------------------------------------------------------------ capture */
 
-async function captureEnums(): Promise<{ name: string; ddl: string }[]> {
+async function captureEnums(exec: Exec = db): Promise<{ name: string; ddl: string }[]> {
   const found = await rows<{ name: string; labels: string }>(
-    db,
+    exec,
     sql`select t.typname as name,
                string_agg(quote_literal(e.enumlabel), ', ' order by e.enumsortorder) as labels
           from pg_type t
@@ -101,9 +120,9 @@ async function captureEnums(): Promise<{ name: string; ddl: string }[]> {
   return found.map((r) => ({ name: r.name, ddl: `create type public."${r.name}" as enum (${r.labels})` }));
 }
 
-async function captureSequences(): Promise<{ name: string; lastValue: string | null }[]> {
+async function captureSequences(exec: Exec = db): Promise<{ name: string; lastValue: string | null }[]> {
   const found = await rows<{ name: string; last_value: string | null }>(
-    db,
+    exec,
     sql`select c.relname as name, s.last_value::text as last_value
           from pg_class c
           join pg_namespace n on n.oid = c.relnamespace
@@ -114,9 +133,9 @@ async function captureSequences(): Promise<{ name: string; lastValue: string | n
   return found.map((r) => ({ name: r.name, lastValue: r.last_value }));
 }
 
-async function listTables(): Promise<string[]> {
+async function listTables(exec: Exec = db): Promise<string[]> {
   const found = await rows<{ table_name: string }>(
-    db,
+    exec,
     sql`select c.relname as table_name
           from pg_class c
           join pg_namespace n on n.oid = c.relnamespace
@@ -126,14 +145,14 @@ async function listTables(): Promise<string[]> {
   return found.map((r) => r.table_name).filter((t) => !isExcluded(t));
 }
 
-async function captureColumns(table: string): Promise<SnapshotColumn[]> {
+async function captureColumns(table: string, exec: Exec = db): Promise<SnapshotColumn[]> {
   const found = await rows<{
     name: string;
     type: string;
     not_null: boolean;
     default_expr: string | null;
   }>(
-    db,
+    exec,
     sql`select a.attname as name,
                format_type(a.atttypid, a.atttypmod) as type,
                a.attnotnull as not_null,
@@ -155,9 +174,9 @@ async function captureColumns(table: string): Promise<SnapshotColumn[]> {
   }));
 }
 
-async function captureConstraints(table: string): Promise<{ name: string; def: string }[]> {
+async function captureConstraints(table: string, exec: Exec = db): Promise<{ name: string; def: string }[]> {
   const found = await rows<{ conname: string; def: string }>(
-    db,
+    exec,
     sql`select con.conname, pg_get_constraintdef(con.oid) as def
           from pg_constraint con
           join pg_class c on c.oid = con.conrelid
@@ -173,9 +192,9 @@ async function captureConstraints(table: string): Promise<{ name: string; def: s
  * recreates them). `where not exists (...)` keeps the two lists disjoint — an
  * index created twice would abort the restore.
  */
-async function captureIndexes(table: string): Promise<string[]> {
+async function captureIndexes(table: string, exec: Exec = db): Promise<string[]> {
   const found = await rows<{ indexdef: string }>(
-    db,
+    exec,
     sql`select i.indexdef
           from pg_indexes i
          where i.schemaname = 'public' and i.tablename = ${table}
@@ -205,6 +224,7 @@ function jsonObjectExpression(columns: SnapshotColumn[], alias = ""): string {
 async function captureTableData(
   table: string,
   columns: SnapshotColumn[],
+  exec: Exec = db,
 ): Promise<{ chunks: unknown[][]; rows: number; sha256: string }> {
   const chunks: unknown[][] = [];
   const hashes: string[] = [];
@@ -214,7 +234,7 @@ async function captureTableData(
   for (;;) {
     const expr = jsonObjectExpression(columns);
     const res = await rows<{ payload: unknown[] | null; n: number; last_ct: string | null }>(
-      db,
+      exec,
       sql.raw(
         `select jsonb_agg(j order by ct) as payload,
                 count(*)::int as n,
@@ -248,20 +268,36 @@ async function captureTableData(
  */
 export async function buildSnapshot(opts: { databaseName: string }): Promise<SnapshotFile> {
   const started = Date.now();
-  const tables = await listTables();
-  const enums = await captureEnums();
-  const sequences = await captureSequences();
-  const versionRows = await rows<{ v: string }>(db, sql`select version() as v`);
+  // ONE repeatable-read, read-only transaction for the whole capture. A snapshot
+  // assembled from a connection pool is not a snapshot: a concurrent writer can
+  // land a row between two tables, and the copy then contradicts itself (a
+  // tenant with its accounts missing, an invoice line without its invoice) —
+  // which the restore only discovers when a foreign key refuses to be rebuilt.
+  return db.transaction(async (trx) => {
+    await trx.execute(sql`set transaction isolation level repeatable read, read only`);
+    return captureWithin(trx, opts, started);
+  });
+}
+
+async function captureWithin(
+  trx: Exec,
+  opts: { databaseName: string },
+  started: number,
+): Promise<SnapshotFile> {
+  const tables = await listTables(trx);
+  const enums = await captureEnums(trx);
+  const sequences = await captureSequences(trx);
+  const versionRows = await rows<{ v: string }>(trx, sql`select version() as v`);
 
   const data: Record<string, unknown[][]> = {};
   const manifestTables: SnapshotTable[] = [];
   let rowCount = 0;
 
   for (const table of tables) {
-    const columns = await captureColumns(table);
-    const captured = await captureTableData(table, columns);
-    const constraints = await captureConstraints(table);
-    const indexes = await captureIndexes(table);
+    const columns = await captureColumns(table, trx);
+    const captured = await captureTableData(table, columns, trx);
+    const constraints = await captureConstraints(table, trx);
+    const indexes = await captureIndexes(table, trx);
 
     data[table] = captured.chunks;
     rowCount += captured.rows;
@@ -276,6 +312,20 @@ export async function buildSnapshot(opts: { databaseName: string }): Promise<Sna
     });
   }
 
+  const tenantCounts: Record<string, Record<string, number>> = {};
+  for (const table of manifestTables) {
+    if (!table.columns.some((c) => c.name === "tenant_id")) continue;
+    if (isPlatformScopedCapture(table.name)) continue;
+    for (const chunk of data[table.name] ?? []) {
+      for (const row of chunk as Record<string, unknown>[]) {
+        const tenantId = row.tenant_id;
+        if (typeof tenantId !== "string") continue;
+        const bucket = (tenantCounts[tenantId] ??= {});
+        bucket[table.name] = (bucket[table.name] ?? 0) + 1;
+      }
+    }
+  }
+
   const manifest: SnapshotManifest = {
     version: 1,
     format: "logical-json",
@@ -284,6 +334,7 @@ export async function buildSnapshot(opts: { databaseName: string }): Promise<Sna
     generatedAt: new Date().toISOString(),
     enums,
     tables: manifestTables,
+    tenantCounts,
     sequences,
     skipped: EXCLUDED_PREFIXES.map((p) => `${p}*`),
     rowCount,

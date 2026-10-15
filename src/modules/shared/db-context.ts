@@ -15,6 +15,18 @@ const WRITABLE_STATUSES = new Set(["trial", "active"]);
 export type Trx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 /**
+ * Either the pooled client or a transaction handle.
+ *
+ * Read helpers that may be called from inside a `withTenant` unit of work take
+ * one of these so they reuse the *open* transaction instead of asking the pool
+ * for a second connection. Holding one connection while waiting for another is
+ * how a busy pool turns into a 10-second `connection timeout` (and, with a
+ * single-connection pool, into a deadlock), so nested reads must never reach
+ * for the global client.
+ */
+export type DbExecutor = Pick<typeof db, "select" | "execute">;
+
+/**
  * Run `fn` inside a transaction with tenant RLS context bound.
  * Every tenant-scoped service write/read goes through this (or binds the
  * same config inside an outer transaction via `bindTenant`).
@@ -53,7 +65,11 @@ export async function withTenant<T>(
     try {
       return await fn(trx);
     } catch (e) {
-      if (readOnly && (e as { code?: string }).code === "25006") {
+      // The driver wraps server errors, so the SQLSTATE must be read from the
+      // cause chain as well — otherwise a suspended tenant sees a generic
+      // "query failed" instead of the read-only explanation.
+      const code = (e as { code?: string }).code ?? (e as { cause?: { code?: string } }).cause?.code;
+      if (readOnly && code === "25006") {
         throw errors.validation("errors.tenantReadOnly", "write attempted on a non-active tenant");
       }
       throw e;

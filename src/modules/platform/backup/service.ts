@@ -35,7 +35,7 @@ import {
   sha256Hex,
 } from "./crypto";
 import { buildSnapshot, parseSnapshot, restoreSnapshot, verifySnapshot, type SnapshotFile } from "./snapshot";
-import { runInvariants, type InvariantReport } from "./invariants";
+import { referentialIntegrity, runInvariants, type InvariantReport } from "./invariants";
 import { driveTransport, type RemoteDrive } from "./drive";
 import { pgDumpProbe, runPgDump } from "./pgdump";
 
@@ -228,6 +228,20 @@ export async function verifyBackup(runId: string): Promise<VerifyResult> {
                 });
               } else {
                 fail("content", verdict.problems.slice(0, 3).join("; "));
+              }
+
+              // A checksum-clean copy still is not a database if its own foreign
+              // keys cannot be rebuilt — refuse to call that "verified".
+              const referential = referentialIntegrity(snapshot);
+              if (referential.skipped || referential.ok) {
+                checks.push({
+                  name: "referential_integrity",
+                  ok: true,
+                  skipped: referential.skipped,
+                  detail: referential.detail,
+                });
+              } else {
+                fail("referential_integrity", referential.detail);
               }
             } catch (e) {
               fail("content", `snapshot unreadable: ${e instanceof Error ? e.message : String(e)}`);

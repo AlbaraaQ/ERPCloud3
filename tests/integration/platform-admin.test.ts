@@ -14,6 +14,7 @@
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { sql } from "drizzle-orm";
+import { Client } from "pg";
 
 const DB = process.env.DATABASE_URL;
 const RUN = Math.random().toString(36).slice(2, 8);
@@ -41,6 +42,29 @@ describe.skipIf(!DB)("platform admin — boundaries and lifecycle", () => {
   async function rows<T = Record<string, unknown>>(query: ReturnType<typeof sql>): Promise<T[]> {
     const res = (await db.execute(query)) as unknown as { rows: T[] };
     return res.rows;
+  }
+
+  /**
+   * Reads used to *verify* what the application just did run on their own
+   * connection. The dev engine (PGlite behind the node-postgres wire proxy)
+   * desynchronises after a statement that failed server-side — the pending
+   * ROLLBACK result is handed to the next query on that pooled client, which
+   * would make an assertion see an empty row set. A private connection is
+   * immune, and it is the stronger assertion anyway: it observes the database
+   * through a connection the application never touched.
+   */
+  async function verifyRows<T>(text: string, params: unknown[] = []): Promise<T[]> {
+    const client = new Client({ connectionString: DB });
+    await client.connect();
+    try {
+      return (await client.query(text, params)).rows as T[];
+    } finally {
+      await client.end().catch(() => undefined);
+    }
+  }
+
+  function asDate(value: unknown): Date {
+    return value instanceof Date ? value : new Date(String(value));
   }
 
   beforeAll(async () => {
@@ -84,18 +108,15 @@ describe.skipIf(!DB)("platform admin — boundaries and lifecycle", () => {
 
   afterAll(async () => {
     if (!db) return;
-    const { platformUsers, tenants } = await import("@/db/schema");
+    const { platformUsers } = await import("@/db/schema");
     const { eq } = await import("drizzle-orm");
-    // the throwaway tenant is removed through the deletion workflow in the tests
-    // that need it; anything left is cleaned up with triggers disabled (fixtures
-    // are immutable by design, this is test teardown).
+    // Test teardown removes the throwaway tenant with the same routine the purge
+    // workflow uses (all tenant rows, then the tenant) — a bare `delete from
+    // tenants` would leave orphaned children behind, and a backup containing them
+    // could never rebuild its own foreign keys.
     if (throwawayTenantId) {
-      await db.execute(sql`set session_replication_role = replica`).catch(() => undefined);
-      await db
-        .delete(tenants)
-        .where(eq(tenants.id, throwawayTenantId))
-        .catch(() => undefined);
-      await db.execute(sql`set session_replication_role = default`).catch(() => undefined);
+      const { deleteTenantRows } = await import("@/modules/platform/exports");
+      await db.transaction((trx) => deleteTenantRows(trx, throwawayTenantId)).catch(() => undefined);
     }
     await db.delete(platformUsers).where(eq(platformUsers.id, ownerId)).catch(() => undefined);
     await db.delete(platformUsers).where(eq(platformUsers.id, opsId)).catch(() => undefined);
@@ -254,8 +275,9 @@ describe.skipIf(!DB)("platform admin — boundaries and lifecycle", () => {
       await trx.execute(sql`insert into customers (id, tenant_id, code, name_ar)
                             values (${newId()}::uuid, ${throwawayTenantId}::uuid, ${"C-" + RUN}, ${"عميل " + RUN})`);
     });
-    const before = await rows<{ n: number }>(
-      sql`select count(*)::int as n from customers where tenant_id = ${throwawayTenantId}::uuid`,
+    const before = await verifyRows<{ n: number }>(
+      "select count(*)::int as n from customers where tenant_id = $1::uuid",
+      [throwawayTenantId],
     );
     const tenantAuditBefore = await db
       .select()
@@ -270,11 +292,12 @@ describe.skipIf(!DB)("platform admin — boundaries and lifecycle", () => {
       actorPlatformUserId: ownerId,
     });
 
-    // reads keep working
+    // reads keep working (the app role is the schema owner here, so RLS does not
+    // filter — the count is scoped explicitly, exactly like the services do)
     const visible = await withTenant(throwawayTenantId, async (trx) => {
-      const res = (await trx.execute(sql`select count(*)::int as n from customers`)) as unknown as {
-        rows: { n: number }[];
-      };
+      const res = (await trx.execute(
+        sql`select count(*)::int as n from customers where tenant_id = ${throwawayTenantId}::uuid`,
+      )) as unknown as { rows: { n: number }[] };
       return Number(res.rows[0]!.n);
     });
     expect(visible).toBe(Number(before[0]!.n));
@@ -288,8 +311,9 @@ describe.skipIf(!DB)("platform admin — boundaries and lifecycle", () => {
     ).rejects.toThrow(/tenantReadOnly|read-only/i);
 
     // nothing was deleted by the suspension
-    const after = await rows<{ n: number }>(
-      sql`select count(*)::int as n from customers where tenant_id = ${throwawayTenantId}::uuid`,
+    const after = await verifyRows<{ n: number }>(
+      "select count(*)::int as n from customers where tenant_id = $1::uuid",
+      [throwawayTenantId],
     );
     expect(Number(after[0]!.n)).toBe(Number(before[0]!.n));
 
@@ -327,8 +351,9 @@ describe.skipIf(!DB)("platform admin — boundaries and lifecycle", () => {
       await trx.execute(sql`insert into customers (id, tenant_id, code, name_ar)
                             values (${newId()}::uuid, ${throwawayTenantId}::uuid, ${"Y-" + RUN}, 'after reactivation')`);
     });
-    const grown = await rows<{ n: number }>(
-      sql`select count(*)::int as n from customers where tenant_id = ${throwawayTenantId}::uuid`,
+    const grown = await verifyRows<{ n: number }>(
+      "select count(*)::int as n from customers where tenant_id = $1::uuid",
+      [throwawayTenantId],
     );
     expect(Number(grown[0]!.n)).toBe(Number(before[0]!.n) + 1);
   });
@@ -341,11 +366,11 @@ describe.skipIf(!DB)("platform admin — boundaries and lifecycle", () => {
   });
 
   it("every console mutation is in the platform audit chain, and the chain verifies", async () => {
-    const actions = await rows<{ action: string }>(
-      sql`select action from platform_audit_log where action in
-            ('tenant.suspended','tenant.deactivated','tenant.active','platform.login.success',
-             'platform.2fa.enrollment_required','platform.login.totp_failed')
-          group by action`,
+    const actions = await verifyRows<{ action: string }>(
+      `select action from platform_audit_log where action in
+         ('tenant.suspended','tenant.deactivated','tenant.active','platform.login.success',
+          'platform.2fa.enrollment_required','platform.login.totp_failed')
+       group by action`,
     );
     const seen = actions.map((a) => a.action);
     expect(seen).toContain("tenant.suspended");
@@ -355,10 +380,68 @@ describe.skipIf(!DB)("platform admin — boundaries and lifecycle", () => {
     expect(chain.ok, `chain detail: ${chain.detail}`).toBe(true);
     expect(chain.checked).toBeGreaterThan(0);
 
-    // append-only: the table refuses UPDATE/DELETE even from the owner connection
-    await expect(db.execute(sql`update platform_audit_log set action = 'x'`)).rejects.toThrow(
-      /append-only/i,
+    // append-only: the table refuses UPDATE/DELETE even from the owner connection.
+    // The driver wraps server errors ("Failed query: …"), so the trigger message
+    // is asserted on the cause — the statement must fail *because of the trigger*.
+    const appendOnly = (error: unknown): boolean => {
+      expect(String((error as Error).message)).toMatch(/Failed query/);
+      return /append-only/i.test(String((error as { cause?: { message?: string } }).cause?.message));
+    };
+    await expect(db.execute(sql`update platform_audit_log set action = 'x'`)).rejects.toSatisfy(appendOnly);
+    await expect(db.execute(sql`delete from platform_audit_log`)).rejects.toSatisfy(appendOnly);
+  });
+
+  it("tampering with an audit row is detected — the chain cannot be rewritten quietly", async () => {
+    const { newId } = await import("@/modules/shared/ids");
+
+    /**
+     * Insert a row with a chosen prev_hash/hash inside a transaction that is rolled
+     * back: verification runs against it and leaves no residue, so the evidence
+     * that tampering is detected does not itself pollute the chain.
+     */
+    async function verifiedAfterTamper(
+      prevHash: string | null,
+      hash: string,
+    ): Promise<{ ok: boolean; detail: string | null }> {
+      return db
+        .transaction(async (trx) => {
+          await trx.execute(sql`
+            insert into platform_audit_log (id, actor_label, action, prev_hash, hash)
+            values (${newId()}::uuid, 'test:tamper', 'test.tampered', ${prevHash}, ${hash})
+          `);
+          const res = (await trx.execute(
+            sql`select ok, detail from public.verify_platform_audit_chain(100000)`,
+          )) as unknown as { rows: { ok: boolean; detail: string | null }[] };
+          throw Object.assign(new Error("rollback-after-tamper-check"), { result: res.rows[0]! });
+        })
+        .catch((error: Error & { result?: { ok: boolean; detail: string | null } }) => {
+          expect(error.message).toBe("rollback-after-tamper-check");
+          return error.result!;
+        });
+    }
+
+    const last = await verifyRows<{ hash: string }>(
+      "select hash from platform_audit_log order by at desc, id desc limit 1",
     );
+    const prev = last[0]?.hash ?? null;
+
+    // (a) content tampering with a correctly linked row is caught by the row hash
+    const content = await verifiedAfterTamper(prev, "0".repeat(64));
+    expect(content.ok).toBe(false);
+    expect(content.detail).toContain("row hash does not match its contents");
+
+    // (b) dropping a row from the middle is caught by the link, not by silence
+    const relink = await verifiedAfterTamper("1".repeat(64), "1".repeat(64));
+    expect(relink.ok).toBe(false);
+    expect(relink.detail).toContain("prev_hash does not match");
+
+    // no residue, and the real chain still verifies afterwards
+    const residue = await verifyRows<{ n: number }>(
+      "select count(*)::int as n from platform_audit_log where actor_label = 'test:tamper'",
+    );
+    expect(Number(residue[0]!.n)).toBe(0);
+    const chain = await auditMod.verifyAuditChain(5000);
+    expect(chain.ok, `chain detail: ${chain.detail}`).toBe(true);
   });
 
   it("the platform data layer returns counts and configuration, never tenant amounts", async () => {
@@ -380,7 +463,10 @@ describe.skipIf(!DB)("platform admin — boundaries and lifecycle", () => {
         platformUserId: ownerId,
         screen: "accounting",
       }),
-    ).rejects.toThrow(/grant/i);
+    ).rejects.toMatchObject({
+      kind: "PermissionDenied",
+      meta: { permission: "platform.grant.required" },
+    });
   });
 
   it("break-glass grants: two-person, scoped, time-boxed, audited, revocable", async () => {
@@ -393,10 +479,11 @@ describe.skipIf(!DB)("platform admin — boundaries and lifecycle", () => {
       actorLabel: "test",
     });
 
-    const [row] = await rows<{ expires_at: Date; scope: { screens: string[]; amounts: boolean } }>(
-      sql`select expires_at, scope from support_grants where id = ${requested}::uuid`,
+    const [row] = await verifyRows<{ expires_at: Date | string; scope: { screens: string[]; amounts: boolean } }>(
+      "select expires_at, scope from support_grants where id = $1::uuid",
+      [requested],
     );
-    const hours = (row!.expires_at.getTime() - Date.now()) / 3_600_000;
+    const hours = (asDate(row!.expires_at).getTime() - Date.now()) / 3_600_000;
     expect(hours).toBeLessThanOrEqual(24.5);
 
     // requester cannot approve their own grant
@@ -407,12 +494,18 @@ describe.skipIf(!DB)("platform admin — boundaries and lifecycle", () => {
         approverRole: "owner",
         actorLabel: "test",
       }),
-    ).rejects.toThrow(/two-person|ثان/i);
+    ).rejects.toThrow(/platformGrantTwoPerson/);
+    // …and the key it throws is a real, translated message in both locales
+    const { getDict } = await import("@/i18n");
+    for (const locale of ["ar", "en"] as const) {
+      const dict = getDict(locale) as unknown as { errors: Record<string, string> };
+      expect(dict.errors.platformGrantTwoPerson, `${locale} message`).toBeTruthy();
+    }
 
     // an unapproved grant grants nothing
     await expect(
       grants.assertGrantAccess({ tenantId: throwawayTenantId, platformUserId: opsId, screen: "accounting" }),
-    ).rejects.toThrow(/grant/i);
+    ).rejects.toMatchObject({ meta: { permission: "platform.grant.required" } });
 
     await grants.approveGrant({
       grantId: requested,
@@ -421,32 +514,37 @@ describe.skipIf(!DB)("platform admin — boundaries and lifecycle", () => {
       actorLabel: "test",
     });
 
-    // approved: the scope still decides what is reachable
+    // approved: the operator who asked may now read the granted screen…
     const allowed = await grants.assertGrantAccess({
       tenantId: throwawayTenantId,
-      platformUserId: opsId,
+      platformUserId: ownerId,
       screen: "accounting",
     });
     expect(allowed.grantId).toBe(requested);
 
+    // …while the approver still cannot browse with it (approving is not reading)
+    await expect(
+      grants.assertGrantAccess({ tenantId: throwawayTenantId, platformUserId: opsId, screen: "accounting" }),
+    ).rejects.toMatchObject({ kind: "PermissionDenied", meta: { permission: "platform.grant.required" } });
+
     await expect(
       grants.assertGrantAccess({
         tenantId: throwawayTenantId,
-        platformUserId: opsId,
+        platformUserId: ownerId,
         screen: "accounting",
         needsAmounts: true,
       }),
-    ).rejects.toThrow(/amounts|مبالغ/i);
+    ).rejects.toMatchObject({ kind: "PermissionDenied", meta: { permission: "platform.grant.amounts" } });
 
     await expect(
-      grants.assertGrantAccess({ tenantId: throwawayTenantId, platformUserId: opsId, screen: "reports" }),
-    ).rejects.toThrow(/scope/i);
+      grants.assertGrantAccess({ tenantId: throwawayTenantId, platformUserId: ownerId, screen: "reports" }),
+    ).rejects.toMatchObject({ kind: "PermissionDenied", meta: { permission: "platform.grant.scope" } });
 
     await grants.recordGrantUse({
       grantId: requested,
       screen: "accounting",
-      actorLabel: "ops",
-      actorPlatformUserId: opsId,
+      actorLabel: "owner",
+      actorPlatformUserId: ownerId,
       tenantId: throwawayTenantId,
     });
     const used = await rows<{ use_count: number; last_used_at: Date | null }>(
@@ -469,8 +567,8 @@ describe.skipIf(!DB)("platform admin — boundaries and lifecycle", () => {
       reason: "انتهت المهمة",
     });
     await expect(
-      grants.assertGrantAccess({ tenantId: throwawayTenantId, platformUserId: opsId, screen: "accounting" }),
-    ).rejects.toThrow(/grant/i);
+      grants.assertGrantAccess({ tenantId: throwawayTenantId, platformUserId: ownerId, screen: "accounting" }),
+    ).rejects.toMatchObject({ meta: { permission: "platform.grant.required" } });
   });
 
   it("quotas are enforced at the write boundary with a warning band", async () => {
@@ -484,10 +582,39 @@ describe.skipIf(!DB)("platform admin — boundaries and lifecycle", () => {
       actorPlatformUserId: ownerId,
     });
 
+    // the plan row is instance-wide state: pin it (and restore it afterwards) so
+    // the warning band is asserted against a known limit instead of whatever a
+    // previous run left behind
+    const { plans: planTable } = await import("@/db/schema");
+    const { eq: eqOp } = await import("drizzle-orm");
+    const [planBefore] = await db.select().from(planTable).where(eqOp(planTable.code, "starter"));
+    const restorePlan = async () => {
+      if (planBefore) {
+        await db
+          .update(planTable)
+          .set({ entitlements: planBefore.entitlements })
+          .where(eqOp(planTable.code, "starter"));
+      }
+    };
+    await db
+      .update(planTable)
+      .set({ entitlements: { features: [], quotas: { users: 5, branches: 5, warehouses: 5, invoicesPerMonth: 100 } } })
+      .where(eqOp(planTable.code, "starter"));
+
     const state = await withTenant(throwawayTenantId, (trx) => plans.quotaState(trx, throwawayTenantId));
     expect(state.map((s) => s.metric)).toContain("users");
     const users = state.find((s) => s.metric === "users")!;
-    expect(users.used).toBeGreaterThan(0);
+
+    // The counts must be scoped by tenant_id in the query itself: this connection
+    // is the table owner (a privileged role bypasses RLS entirely), so a count
+    // that leans on policies reports the whole database — 18 users, not 1.
+    const ownUsers = await verifyRows<{ n: number }>(
+      "select count(*)::int as n from users where tenant_id = $1::uuid",
+      [throwawayTenantId],
+    );
+    const allUsers = await verifyRows<{ n: number }>("select count(*)::int as n from users");
+    expect(Number(allUsers[0]!.n)).toBeGreaterThan(Number(ownUsers[0]!.n)); // the trap is real here
+    expect(users.used).toBe(Number(ownUsers[0]!.n));
     expect(users.exceeded).toBe(false);
 
     // a plan with users quota 1 cannot accept a second user
@@ -508,5 +635,15 @@ describe.skipIf(!DB)("platform admin — boundaries and lifecycle", () => {
 
     // at capacity but not over it: allowed
     await withTenant(throwawayTenantId, (trx) => plans.assertQuota(trx, throwawayTenantId, "users", 0));
+
+    // the warning band starts at 80 % of the limit and the hard block only at over-capacity
+    const warning = (await withTenant(throwawayTenantId, (trx) => plans.quotaState(trx, throwawayTenantId))).find(
+      (s) => s.metric === "users",
+    )!;
+    expect(warning.limit).toBe(Number(ownUsers[0]!.n));
+    expect(warning.ratio).toBe(1);
+    expect(warning.exceeded).toBe(true); // at the limit, not over it — nothing was blocked
+
+    await restorePlan();
   }, 60_000);
 });

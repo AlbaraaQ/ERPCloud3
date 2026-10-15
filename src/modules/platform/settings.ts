@@ -10,6 +10,7 @@
 import { eq } from "drizzle-orm";
 import { db } from "@/db";
 import { platformSettings } from "@/db/schema";
+import type { DbExecutor } from "@/modules/shared/db-context";
 
 export interface BackupPolicy {
   /** Directory for encrypted artifacts (never inside the web root). */
@@ -54,8 +55,8 @@ export const SETTINGS_DEFAULTS: PlatformSettings = {
 
 export const SETTINGS_KEY = "platform";
 
-export async function getSettings(): Promise<PlatformSettings> {
-  const [row] = await db
+export async function getSettings(exec: DbExecutor = db): Promise<PlatformSettings> {
+  const [row] = await exec
     .select()
     .from(platformSettings)
     .where(eq(platformSettings.key, SETTINGS_KEY))

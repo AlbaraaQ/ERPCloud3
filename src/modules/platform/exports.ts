@@ -21,7 +21,7 @@ import { deletionRequests, tenantExports, tenants } from "@/db/schema";
 import { errors } from "@/modules/shared/result";
 import { newId } from "@/modules/shared/ids";
 import { appKey, randomToken, sha256Hex } from "@/modules/shared/crypto";
-import { withTenant } from "@/modules/shared/db-context";
+import { withTenant, type Trx } from "@/modules/shared/db-context";
 import { logger } from "@/modules/shared/logger";
 import { writePlatformAudit } from "./audit";
 import { getSettings } from "./settings";
@@ -130,10 +130,12 @@ export async function buildTenantExport(input: {
     const files: { name: string; rows: number; sha256: string; content: string }[] = [];
     await withTenant(input.tenantId, async (trx) => {
       for (const table of EXPORT_TABLES) {
-        // RLS binds to this tenant: a cross-tenant row cannot appear here.
+        // Scope explicitly — never lean on RLS here: the application role is the
+        // table owner (privileged connections bypass policies), so an unscoped
+        // select would put every tenant's rows in one tenant's bundle.
         const rows = (await trx.execute(
           sql.raw(`select coalesce(jsonb_agg(t), '[]'::jsonb)::text as payload, count(*)::int as n
-                   from (select * from ${table}) t`),
+                   from (select * from ${table} where tenant_id = '${input.tenantId}'::uuid) t`),
         )) as unknown as { rows: { payload: string; n: number }[] };
         const payload = rows.rows[0]?.payload ?? "[]";
         files.push({
@@ -423,24 +425,7 @@ export async function purgeTenant(input: {
 
   const safety = await runBackup({ kind: "safety", actorLabel: input.actorLabel, skipRemote: true });
 
-  const counts: Record<string, number> = {};
-  await db.transaction(async (trx) => {
-    // Triggers protect posted documents from ordinary deletion; a purge is not an
-    // ordinary deletion, so replication role is used to bypass them explicitly.
-    await trx.execute(sql`set local session_replication_role = replica`);
-    const tables = (await trx.execute(
-      sql`select table_name from information_schema.columns
-          where table_schema = 'public' and column_name = 'tenant_id'`,
-    )) as unknown as { rows: { table_name: string }[] };
-    for (const { table_name } of tables.rows) {
-      const res = await trx.execute(
-        sql.raw(`delete from public."${table_name}" where tenant_id = '${tenant.id}'::uuid`),
-      );
-      const deleted = (res as unknown as { rowCount?: number }).rowCount ?? 0;
-      if (deleted > 0) counts[table_name] = deleted;
-    }
-    await trx.execute(sql`delete from public.tenants where id = ${tenant.id}::uuid`);
-  });
+  const counts = await db.transaction((trx) => deleteTenantRows(trx, tenant.id));
 
   const certificate = {
     tenantId: tenant.id,
@@ -473,6 +458,81 @@ export async function purgeTenant(input: {
   });
   logger.warn({ tenantId: tenant.id, rows: certificate.totalDeleted }, "tenant purged by platform operator");
   return { certificate };
+}
+
+/**
+ * Remove every row that belongs to one tenant, then the tenant itself, returning
+ * the per-table counts that go into the deletion certificate.
+ *
+ * Every table is discovered from the catalog (`tenant_id` column) instead of a
+ * hard-coded list, so a table added later cannot be forgotten. Row triggers are
+ * disabled for the statement: posted documents are immutable by design and a
+ * purge is not an ordinary deletion — an ordinary `delete` would be refused, and
+ * a half-purge would leave orphaned children pointing at a tenant that no longer
+ * exists (which is exactly what a drill cannot restore).
+ *
+ * Must run inside a transaction (the replication-role switch is transaction-local).
+ */
+export async function deleteTenantRows(trx: Trx, tenantId: string): Promise<Record<string, number>> {
+  await trx.execute(sql`set local session_replication_role = replica`);
+  const tables = (await trx.execute(
+    sql`select table_name from information_schema.columns
+        where table_schema = 'public' and column_name = 'tenant_id'
+        order by table_name`,
+  )) as unknown as { rows: { table_name: string }[] };
+  const counts: Record<string, number> = {};
+
+  // Join tables (role_permissions, user_roles, …) carry no tenant_id: they are
+  // reachable only through a parent that does. Delete those first — children
+  // before parents — otherwise the purge removes the parents and leaves the join
+  // rows behind, pointing at a tenant that no longer exists.
+  const links = (await trx.execute(sql`
+    select con.conrelid::regclass::text as child_table,
+           (select string_agg(quote_ident(a.attname), ', ' order by u.ord)
+              from unnest(con.conkey) with ordinality u(attnum, ord)
+              join pg_attribute a on a.attrelid = con.conrelid and a.attnum = u.attnum) as child_cols,
+           con.confrelid::regclass::text as parent_table,
+           (select string_agg(quote_ident(a.attname), ', ' order by u.ord)
+              from unnest(con.confkey) with ordinality u(attnum, ord)
+              join pg_attribute a on a.attrelid = con.confrelid and a.attnum = u.attnum) as parent_cols
+      from pg_constraint con
+     where con.contype = 'f' and con.connamespace = 'public'::regnamespace
+       and not exists (select 1 from information_schema.columns c
+                        where c.table_schema = 'public' and c.table_name = con.conrelid::regclass::text
+                          and c.column_name = 'tenant_id')
+  `)) as unknown as { rows: { child_table: string; child_cols: string; parent_table: string; parent_cols: string }[] };
+
+  // a child can itself be a parent of another child, so sweep until it settles
+  for (let pass = 0; pass < 5; pass += 1) {
+    let removed = 0;
+    for (const link of links.rows) {
+      const child = link.child_table.replace(/^public\./, "");
+      const parent = link.parent_table.replace(/^public\./, "");
+      const res = await trx.execute(
+        sql.raw(`delete from public."${child}" c
+                  where (${link.child_cols.split(",").map((c) => `c.${c.trim()}`).join(", ")})
+                        in (select ${link.parent_cols.split(",").map((c) => `p.${c.trim()}`).join(", ")}
+                              from public."${parent}" p
+                             where p.tenant_id = '${tenantId}'::uuid)`),
+      );
+      const deleted = (res as unknown as { rowCount?: number }).rowCount ?? 0;
+      if (deleted > 0) {
+        counts[child] = (counts[child] ?? 0) + deleted;
+        removed += deleted;
+      }
+    }
+    if (removed === 0) break;
+  }
+
+  for (const { table_name } of tables.rows) {
+    const res = await trx.execute(
+      sql.raw(`delete from public."${table_name}" where tenant_id = '${tenantId}'::uuid`),
+    );
+    const deleted = (res as unknown as { rowCount?: number }).rowCount ?? 0;
+    if (deleted > 0) counts[table_name] = (counts[table_name] ?? 0) + deleted;
+  }
+  await trx.execute(sql`delete from public.tenants where id = ${tenantId}::uuid`);
+  return counts;
 }
 
 export async function listDeletionRequests(limit = 50) {

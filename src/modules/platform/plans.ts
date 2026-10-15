@@ -11,8 +11,9 @@ import { and, eq, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { plans, subscriptions, tenants, usageMetrics, type PlanEntitlements } from "@/db/schema";
 import { errors } from "@/modules/shared/result";
-import type { Trx } from "@/modules/shared/db-context";
+import type { DbExecutor, Trx } from "@/modules/shared/db-context";
 import { newId } from "@/modules/shared/ids";
+import { monthOf, monthRange, todayBusinessDate } from "@/modules/shared/dates";
 
 export type QuotaMetric = "users" | "branches" | "warehouses" | "invoicesPerMonth";
 
@@ -41,27 +42,28 @@ export async function listPlans(includeInactive = true) {
   return includeInactive ? rows : rows.filter((p) => p.isActive);
 }
 
-export async function getPlan(code: string) {
-  const [row] = await db.select().from(plans).where(eq(plans.code, code)).limit(1);
+export async function getPlan(code: string, exec: DbExecutor = db) {
+  const [row] = await exec.select().from(plans).where(eq(plans.code, code)).limit(1);
   return row ?? null;
 }
 
 /** Effective entitlements for a tenant: subscription plan, else the tenant's plan column. */
 export async function effectiveEntitlements(
   tenantId: string,
+  exec: DbExecutor = db,
 ): Promise<{ planCode: string; entitlements: PlanEntitlements; features: Set<string> }> {
-  const [sub] = await db
+  const [sub] = await exec
     .select({ planCode: subscriptions.planCode })
     .from(subscriptions)
     .where(eq(subscriptions.tenantId, tenantId))
     .limit(1);
-  const [tenant] = await db
+  const [tenant] = await exec
     .select({ plan: tenants.plan })
     .from(tenants)
     .where(eq(tenants.id, tenantId))
     .limit(1);
   const code = sub?.planCode ?? tenant?.plan ?? "trial";
-  const plan = await getPlan(code);
+  const plan = await getPlan(code, exec);
   const entitlements = plan?.entitlements ?? {};
   return { planCode: code, entitlements, features: new Set(entitlements.features ?? []) };
 }
@@ -73,13 +75,20 @@ export async function effectiveEntitlements(
  * the tenant) and cheap: indexed counts, no document content.
  */
 export async function currentUsage(trx: Trx, tenantId: string): Promise<Record<QuotaMetric, number>> {
+  // `business_date` is an ISO `YYYY-MM-DD` string everywhere in this schema
+  // (D-00x business-date rule), so the month window is built in TypeScript in the
+  // tenant timezone and compared as text — casting the column to date would
+  // bypass its index and mix two date semantics in one query.
+  const month = monthRange(monthOf(todayBusinessDate()));
   const rows = (await trx.execute(sql`
     select
-      (select count(*) from users)::int as users,
-      (select count(*) from branches)::int as branches,
-      (select count(*) from warehouses)::int as warehouses,
+      (select count(*) from users where tenant_id = ${tenantId}::uuid)::int as users,
+      (select count(*) from branches where tenant_id = ${tenantId}::uuid)::int as branches,
+      (select count(*) from warehouses where tenant_id = ${tenantId}::uuid)::int as warehouses,
       (select count(*) from sales_invoices
-        where business_date >= date_trunc('month', now())::date
+        where tenant_id = ${tenantId}::uuid
+          and business_date >= ${month.from}
+          and business_date <= ${month.to}
           and business_status <> 'draft')::int as invoices_month
   `)) as unknown as {
     rows: { users: number; branches: number; warehouses: number; invoices_month: number }[];
@@ -94,7 +103,7 @@ export async function currentUsage(trx: Trx, tenantId: string): Promise<Record<Q
 }
 
 export async function quotaState(trx: Trx, tenantId: string): Promise<QuotaState[]> {
-  const { entitlements } = await effectiveEntitlements(tenantId);
+  const { entitlements } = await effectiveEntitlements(tenantId, trx);
   const usage = await currentUsage(trx, tenantId);
   const quotas = entitlements.quotas ?? {};
   const metrics: QuotaMetric[] = ["users", "branches", "warehouses", "invoicesPerMonth"];
@@ -161,22 +170,27 @@ export async function captureUsageForTenant(
   opts: { day: string; month: string },
   withTenant: <T>(tenantId: string, fn: (trx: Trx) => Promise<T>) => Promise<T>,
 ): Promise<Record<string, number>> {
+  const businessMonth = monthRange(opts.month);
   const counts = await withTenant(tenantId, async (trx) => {
     const rows = (await trx.execute(sql`
       select
-        (select count(*) from users)::int as users,
-        (select count(*) from branches)::int as branches,
-        (select count(*) from warehouses)::int as warehouses,
-        (select count(*) from products)::int as products,
-        (select count(*) from customers)::int as customers,
-        (select count(*) from representatives where status = 'active')::int as reps,
+        (select count(*) from users where tenant_id = ${tenantId}::uuid)::int as users,
+        (select count(*) from branches where tenant_id = ${tenantId}::uuid)::int as branches,
+        (select count(*) from warehouses where tenant_id = ${tenantId}::uuid)::int as warehouses,
+        (select count(*) from products where tenant_id = ${tenantId}::uuid)::int as products,
+        (select count(*) from customers where tenant_id = ${tenantId}::uuid)::int as customers,
+        (select count(*) from representatives
+          where tenant_id = ${tenantId}::uuid and status = 'active')::int as reps,
         (select count(*) from sales_invoices
-          where business_date >= date_trunc('month', now())::date and business_status <> 'draft')::int
-          as invoices_month,
+          where tenant_id = ${tenantId}::uuid
+            and business_date >= ${businessMonth.from} and business_date <= ${businessMonth.to}
+            and business_status <> 'draft')::int as invoices_month,
         (select count(*) from receipts
-          where business_date >= date_trunc('month', now())::date)::int as receipts_month,
-        (select count(*) from journal_entries where status = 'posted')::int as journals_posted,
-        (select count(*) from invoice_submissions)::int as submissions
+          where tenant_id = ${tenantId}::uuid
+            and business_date >= ${businessMonth.from} and business_date <= ${businessMonth.to})::int as receipts_month,
+        (select count(*) from journal_entries
+          where tenant_id = ${tenantId}::uuid and status = 'posted')::int as journals_posted,
+        (select count(*) from invoice_submissions where tenant_id = ${tenantId}::uuid)::int as submissions
     `)) as unknown as { rows: Record<string, number>[] };
     return rows.rows[0] ?? {};
   });

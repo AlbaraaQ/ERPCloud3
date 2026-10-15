@@ -132,7 +132,14 @@ export async function listGrants(tenantId?: string, limit = 50) {
     .limit(limit);
 }
 
-/** A live grant = approved by a second person, not revoked, not expired. */
+/**
+ * A live grant = approved by a second person, not revoked, not expired.
+ *
+ * It is usable by the operator it was requested for, and only by them: the
+ * approver approves, they do not browse (four-eyes is not a licence for the
+ * approver to read the tenant's books). With no `platformUserId` the newest live
+ * grant for the tenant is returned — for listings, never for the access gate.
+ */
 export async function activeGrant(tenantId: string, platformUserId?: string) {
   const rows = await db
     .select()

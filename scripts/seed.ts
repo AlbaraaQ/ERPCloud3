@@ -61,6 +61,22 @@ async function ensurePermissionCatalog() {
   return added;
 }
 
+/**
+ * Platform codes were briefly seeded into the tenant permission catalog; a role
+ * carrying them must never exist again (PLATFORM_ADMIN §1: platform authority is
+ * not a tenant permission). Both the stale grants and the catalog rows go.
+ */
+async function revokePlatformGrantedPermissions() {
+  const grants = (await db.execute(sql`
+    delete from role_permissions rp
+     using permissions p
+     where p.code = rp.permission_code and p.code like 'platform.%'
+    returning 1`)) as unknown as { rows: unknown[] };
+  const stale = (await db.execute(sql`
+    delete from permissions where code like 'platform.%' returning 1`)) as unknown as { rows: unknown[] };
+  return { grants: grants.rows.length, stale: stale.rows.length };
+}
+
 async function ensurePlatformOwner() {
   const email = (process.env.SEED_PLATFORM_EMAIL ?? "admin@hisab.sa").toLowerCase();
   const found = await db.execute(sql`select * from public.platform_login_lookup(${email})`);
@@ -401,6 +417,10 @@ async function main() {
   console.log("— seed: permission catalog");
   const permsAdded = await ensurePermissionCatalog();
   console.log(`   permissions catalog ready (${PERMISSIONS.length} codes, +${permsAdded} new)`);
+  const revoked = await revokePlatformGrantedPermissions();
+  if (revoked.grants || revoked.stale) {
+    console.log(`   removed ${revoked.grants} platform grant(s) from tenant roles and ${revoked.stale} stale catalog row(s)`);
+  }
 
   console.log("— seed: platform owner");
   const platform = await ensurePlatformOwner();

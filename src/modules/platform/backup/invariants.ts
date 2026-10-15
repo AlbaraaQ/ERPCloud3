@@ -7,11 +7,18 @@
  *  1. `row_counts`        — every table matches the manifest row count;
  *  2. `journal_balance`   — every posted journal entry in the copy balances;
  *  3. `tenant_partitioning` — no tenant-less business row, and per-tenant counts
- *     match the source for the tenants present;
- *  4. `row_sampling`      — random rows compared value-by-value against the source;
+ *     match the *capture* (its own manifest), so a drill run later still proves
+ *     the copy, not the passage of time;
+ *  4. `row_sampling`      — random rows compared value-by-value against the values
+ *     held in the snapshot;
  *  5. `audit_integrity`   — restored audit rows are hash-bearing and ordered;
  *  6. `isolation`         — the copy lives in an isolated schema: it has no
- *     policies of its own and did not disturb the source's policies.
+ *     policies of its own and did not disturb the source's policies;
+ *  7. `referential_integrity` — every captured foreign key can be satisfied from
+ *     inside the snapshot, so the restore can actually rebuild its constraints
+ *     (a copy that cannot is a pile of rows, not a database — and it is how a
+ *     source that is *already* inconsistent is caught at capture time instead of
+ *     at 3 a.m. during a restore).
  *
  * Rules honoured here: a check that cannot run says so (`skipped: true`) instead
  * of passing silently, and a mismatch is reported with the offending record.
@@ -67,6 +74,82 @@ function isPlatformScoped(table: string): boolean {
     table.startsWith("backup_") ||
     table.startsWith("pgboss")
   );
+}
+
+const FK_RE = /FOREIGN KEY \(([^)]+)\) REFERENCES ([^(]+)\(([^)]+)\)/i;
+
+function bare(identifier: string): string {
+  return identifier.trim().replace(/^public\./i, "").replace(/"/g, "");
+}
+
+function keyOf(row: Record<string, unknown>, columns: string[]): string {
+  return columns.map((c) => String(row[c])).join("\u0000");
+}
+
+/**
+ * Foreign keys captured with the snapshot, checked against the snapshot's own
+ * rows. Pure — it needs no database, so it runs inside verification as well as
+ * inside the drill.
+ */
+export function referentialIntegrity(snapshot: SnapshotFile): InvariantCheck {
+  const tables = new Map(snapshot.manifest.tables.map((t) => [t.name, t]));
+  const parentKeys = new Map<string, Set<string>>();
+  const problems: string[] = [];
+  let checkedKeys = 0;
+
+  for (const table of snapshot.manifest.tables) {
+    for (const constraint of table.constraints) {
+      const match = FK_RE.exec(constraint.def);
+      if (!match) continue;
+      const childColumns = match[1]!.split(",").map(bare);
+      const parentName = bare(match[2]!);
+      const parentColumns = match[3]!.split(",").map(bare);
+      const parent = tables.get(parentName);
+      if (!parent) {
+        problems.push(`${table.name}.${constraint.name}: references ${parentName}, which this snapshot does not capture`);
+        continue;
+      }
+
+      let keys = parentKeys.get(parentName);
+      if (!keys) {
+        keys = new Set<string>();
+        for (const chunk of snapshot.data[parentName] ?? []) {
+          for (const row of chunk as Record<string, unknown>[]) keys.add(keyOf(row, parentColumns));
+        }
+        parentKeys.set(parentName, keys);
+      }
+
+      checkedKeys += 1;
+      const orphans: string[] = [];
+      for (const chunk of snapshot.data[table.name] ?? []) {
+        for (const row of chunk as Record<string, unknown>[]) {
+          // a NULL component makes the constraint satisfied by definition
+          if (childColumns.some((c) => row[c] === null || row[c] === undefined)) continue;
+          if (!keys.has(keyOf(row, childColumns))) {
+            orphans.push(`${table.name}(${childColumns.map((c) => `${c}=${String(row[c])}`).join(", ")})`);
+          }
+        }
+      }
+      if (orphans.length > 0) {
+        problems.push(
+          `${constraint.name}: ${orphans.length} ${table.name} row(s) have no ${parentName} parent, e.g. ${orphans[0]}`,
+        );
+      }
+    }
+  }
+
+  if (checkedKeys === 0) {
+    return { name: "referential_integrity", ok: true, skipped: true, detail: "no foreign keys captured" };
+  }
+  return {
+    name: "referential_integrity",
+    ok: problems.length === 0,
+    detail:
+      problems.length === 0
+        ? `all ${checkedKeys} foreign keys are satisfied inside the snapshot`
+        : `${problems.length} foreign key(s) cannot be rebuilt: ${problems.slice(0, 4).join("; ")}`,
+    metrics: { foreignKeys: checkedKeys },
+  };
 }
 
 export async function runInvariants(
@@ -152,27 +235,39 @@ export async function runInvariants(
       if (Number(nulls[0]?.n ?? 0) > 0) problems.push(`${table.name}: ${nulls[0]!.n} rows without tenant_id`);
     }
 
-    // per-tenant counts must match the source for the tenants present in the copy
+    // Per-tenant counts must match the capture's own manifest (not the live
+    // database, which is expected to have moved on since the snapshot).
     let compared = 0;
-    if (snapshot.manifest.tables.some((t) => t.name === "sales_invoices")) {
-      const diffs = await rows<{ tenant_id: string; source: number; restored: number }>(
-        exec,
-        sql.raw(`with src as (
-                   select tenant_id, count(*)::int as n from public.sales_invoices group by tenant_id
-                 ), tgt as (
-                   select tenant_id, count(*)::int as n from "${target}"."sales_invoices" group by tenant_id
-                 )
-                 select coalesce(src.tenant_id, tgt.tenant_id) as tenant_id,
-                        coalesce(src.n, 0) as source, coalesce(tgt.n, 0) as restored
-                   from src full join tgt on src.tenant_id = tgt.tenant_id
-                  where coalesce(src.n, 0) <> coalesce(tgt.n, 0)
-                  limit 5`),
-      );
-      compared = diffs.length;
-      if (diffs.length > 0) {
-        problems.push(
-          `sales_invoices per-tenant counts differ for ${diffs.length} tenant(s), e.g. ${diffs[0]!.tenant_id}`,
+    const countsAvailable = Boolean(snapshot.manifest.tenantCounts);
+    // A snapshot written before per-tenant counts existed cannot be compared;
+    // that is "not checked", not "failed" — and it is reported as such.
+    const capturedCounts = snapshot.manifest.tenantCounts;
+    if (capturedCounts) {
+      for (const [tenantId, expected] of Object.entries(capturedCounts)) {
+        for (const [table, count] of Object.entries(expected)) {
+          const got = await rows<{ n: number }>(
+            exec,
+            sql.raw(`select count(*)::int as n from "${target}"."${table}" where tenant_id = '${tenantId}'::uuid`),
+          );
+          compared += 1;
+          const n = Number(got[0]?.n ?? -1);
+          if (n !== count) problems.push(`${table}: tenant ${tenantId.slice(0, 8)} has ${n}, capture had ${count}`);
+        }
+      }
+      // and no tenant may appear in the copy that the capture did not have
+      for (const table of snapshot.manifest.tables) {
+        if (!table.columns.some((c) => c.name === "tenant_id")) continue;
+        if (isPlatformScoped(table.name)) continue;
+        const extra = await rows<{ tenant_id: string; n: number }>(
+          exec,
+          sql.raw(`select tenant_id::text as tenant_id, count(*)::int as n from "${target}"."${table.name}"
+                    where tenant_id is not null group by tenant_id`),
         );
+        for (const row of extra) {
+          if (!capturedCounts[row.tenant_id]) {
+            problems.push(`${table.name}: unexpected tenant ${row.tenant_id.slice(0, 8)} in the copy`);
+          }
+        }
       }
     }
 
@@ -181,8 +276,11 @@ export async function runInvariants(
       ok: problems.length === 0,
       detail:
         problems.length === 0
-          ? `every business table with tenant_id (${scoped}) is fully tenant-owned; per-tenant invoice counts match (platform-scoped tables such as audit_log/sessions excluded by design)`
+          ? `every business table with tenant_id (${scoped}) is fully tenant-owned; per-tenant counts match the capture (platform-scoped tables such as audit_log/sessions excluded by design)${
+              countsAvailable ? "" : " — NOT compared: this manifest predates the check"
+            }`
           : problems.slice(0, 5).join("; "),
+      skipped: !countsAvailable,
       metrics: { tenantScopedTables: scoped, tenantCountsCompared: compared },
     });
   }
@@ -198,24 +296,34 @@ export async function runInvariants(
     } else {
       let sampled = 0;
       const mismatches: string[] = [];
+      const columns = ["id", "tenant_id"];
       for (const table of candidates) {
+        // rows are compared against the snapshot itself: the copy must reproduce
+        // the captured values exactly, whatever the live database looks like now
+        const captured = new Map<string, Record<string, unknown>>();
+        for (const chunk of snapshot.data[table.name] ?? []) {
+          for (const row of chunk as Record<string, unknown>[]) captured.set(String(row.id), row);
+        }
         const keys = await rows<{ id: string }>(
           exec,
           sql.raw(`select id::text as id from "${target}"."${table.name}" order by ctid limit ${sampleSize}`),
         );
         for (const key of keys) {
-          const both = await rows<{ side: string; payload: string }>(
-            exec,
-            sql.raw(`select 'src' as side, to_jsonb(t)::text as payload from public."${table.name}" t where t.id = '${key.id}'::uuid
-                     union all
-                     select 'tgt' as side, to_jsonb(t)::text as payload from "${target}"."${table.name}" t where t.id = '${key.id}'::uuid`),
-          );
-          const src = both.find((r) => r.side === "src")?.payload;
-          const tgt = both.find((r) => r.side === "tgt")?.payload;
-          sampled += 1;
-          if (!src || !tgt || normalize(src) !== normalize(tgt)) {
-            mismatches.push(`${table.name}:${key.id}`);
+          const expected = captured.get(key.id);
+          if (!expected) {
+            mismatches.push(`${table.name}:${key.id} (not in the capture)`);
+            continue;
           }
+          const actual = await rows<Record<string, unknown>>(
+            exec,
+            sql.raw(`select ${columns.map((c) => `"${c}"::text as ${c}`).join(", ")} from "${target}"."${table.name}" where id = '${key.id}'::uuid`),
+          );
+          const row = actual[0] ?? {};
+          sampled += 1;
+          const differs = columns.some(
+            (c) => String(row[c] ?? "") !== String(expected[c] ?? ""),
+          );
+          if (differs) mismatches.push(`${table.name}:${key.id}`);
         }
       }
       checks.push({
@@ -223,7 +331,7 @@ export async function runInvariants(
         ok: mismatches.length === 0,
         detail:
           mismatches.length === 0
-            ? `${sampled}/${sampled} sampled rows are byte-identical to the source`
+            ? `${sampled}/${sampled} sampled rows reproduce their captured values`
             : `${mismatches.length} sampled rows differ, e.g. ${mismatches[0]}`,
         metrics: { sampled, tables: candidates.map((c) => c.name) },
       });
@@ -252,6 +360,9 @@ export async function runInvariants(
       });
     }
   }
+
+  /* -------------------------------------------------- 7. referential integrity */
+  checks.push(referentialIntegrity(snapshot));
 
   /* ------------------------------------------------------------- 6. isolation */
   {

@@ -31,7 +31,7 @@ import {
 } from "@/db/schema";
 import { hashPassword } from "@/modules/identity/auth";
 import { PERMISSIONS, ROLE_PRESETS } from "@/modules/shared/permissions";
-import { withTenant, type Trx } from "@/modules/shared/db-context";
+import { withTenant, type DbExecutor, type Trx } from "@/modules/shared/db-context";
 import { errors } from "@/modules/shared/result";
 import { newId } from "@/modules/shared/ids";
 import { ensureCoa, ensureMappings } from "@/modules/accounting/coa";
@@ -434,21 +434,21 @@ export async function setFlag(input: {
 }
 
 /** Effective flag value: tenant override wins, then global, then plan features. */
-export async function effectiveFlags(tenantId: string): Promise<Record<string, boolean>> {
-  const rows = await db
+export async function effectiveFlags(tenantId: string, exec: DbExecutor = db): Promise<Record<string, boolean>> {
+  const rows = await exec
     .select({ tenantId: featureFlags.tenantId, key: featureFlags.key, enabled: featureFlags.enabled })
     .from(featureFlags)
     .where(sql`${featureFlags.tenantId} = ${tenantId} or ${featureFlags.tenantId} is null`);
   const out: Record<string, boolean> = {};
   for (const row of rows.filter((r) => r.tenantId === null)) out[row.key] = row.enabled;
   for (const row of rows.filter((r) => r.tenantId !== null)) out[row.key] = row.enabled;
-  const { features } = await effectiveEntitlements(tenantId);
+  const { features } = await effectiveEntitlements(tenantId, exec);
   for (const feature of features) out[feature] = true;
   return out;
 }
 
-export async function isFeatureEnabled(tenantId: string, key: string): Promise<boolean> {
-  return (await effectiveFlags(tenantId))[key] ?? false;
+export async function isFeatureEnabled(tenantId: string, key: string, exec: DbExecutor = db): Promise<boolean> {
+  return (await effectiveFlags(tenantId, exec))[key] ?? false;
 }
 
 /* ------------------------------------------------------------- console detail */
@@ -480,16 +480,21 @@ export async function tenantOverview(tenantId: string): Promise<TenantOverview> 
     .limit(1);
 
   const detail = await withTenant(tenantId, async (trx) => {
+    // counts are scoped explicitly: RLS is defence in depth, and the application
+    // role is privileged on some deployments (owner/superuser connections bypass
+    // policies entirely), so a bare `count(*)` would report the whole database.
     const rows = (await trx.execute(sql`
       select
-        (select count(*) from users)::int as users,
-        (select count(*) from branches)::int as branches,
-        (select count(*) from warehouses)::int as warehouses,
-        (select count(*) from products)::int as products,
-        (select count(*) from customers)::int as customers,
-        (select count(*) from journal_entries where status = 'posted')::int as posted_journals,
-        (select count(*) from stock_ledger)::int as stock_movements,
-        (select max(business_date)::text from journal_entries where status = 'posted') as last_posting
+        (select count(*) from users where tenant_id = ${tenantId}::uuid)::int as users,
+        (select count(*) from branches where tenant_id = ${tenantId}::uuid)::int as branches,
+        (select count(*) from warehouses where tenant_id = ${tenantId}::uuid)::int as warehouses,
+        (select count(*) from products where tenant_id = ${tenantId}::uuid)::int as products,
+        (select count(*) from customers where tenant_id = ${tenantId}::uuid)::int as customers,
+        (select count(*) from journal_entries
+          where tenant_id = ${tenantId}::uuid and status = 'posted')::int as posted_journals,
+        (select count(*) from stock_ledger where tenant_id = ${tenantId}::uuid)::int as stock_movements,
+        (select max(business_date)::text from journal_entries
+          where tenant_id = ${tenantId}::uuid and status = 'posted') as last_posting
     `)) as unknown as {
       rows: {
         users: number;
