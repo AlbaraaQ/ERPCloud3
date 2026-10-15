@@ -7,13 +7,22 @@
  * access: reading tenant books needs a valid, approved, unexpired support grant.
  */
 
+/**
+ * Reading a console screen and changing what it shows are separate rights: a
+ * viewer role must be possible without handing out the ability to mutate. Every
+ * `.view` code below is granted to both roles; only the mutations differ.
+ */
 export const PLATFORM_PERMISSIONS = [
   "platform.tenants.view",
   "platform.tenants.manage",
+  "platform.plans.view",
   "platform.plans.manage",
+  "platform.flags.view",
   "platform.flags.manage",
   "platform.ops.view",
+  "platform.alerts.view",
   "platform.alerts.manage",
+  "platform.backups.view",
   "platform.backup.run",
   "platform.backup.verify",
   "platform.backup.restore",
@@ -21,6 +30,7 @@ export const PLATFORM_PERMISSIONS = [
   "platform.grants.approve",
   "platform.grants.revoke",
   "platform.audit.view",
+  "platform.exports.view",
   "platform.exports.manage",
   "platform.data.delete",
   "platform.settings.manage",
@@ -34,13 +44,18 @@ const ROLE_PERMISSIONS: Record<string, PlatformPermission[]> = {
   ops: [
     "platform.tenants.view",
     "platform.tenants.manage",
+    "platform.plans.view",
+    "platform.flags.view",
     "platform.ops.view",
+    "platform.alerts.view",
     "platform.alerts.manage",
+    "platform.backups.view",
     "platform.backup.run",
     "platform.backup.verify",
     "platform.grants.request",
     "platform.grants.revoke",
     "platform.audit.view",
+    "platform.exports.view",
     "platform.exports.manage",
   ],
 };

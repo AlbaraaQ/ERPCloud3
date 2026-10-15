@@ -330,10 +330,17 @@ describe.skipIf(!DB)("platform backups — capture, verify, restore drill, reten
     expect(fresh.stale).toBe(false);
     expect(fresh.verifiedCount).toBeGreaterThan(0);
 
-    // temporarily move every verified run out of the window
-    const { backupRuns } = await import("@/db/schema");
-    await db.execute(sql`update backup_runs set finished_at = now() - interval '40 hours' where status = 'verified'`);
+    // Temporarily move every verified run out of the window — recording their
+    // original timestamps first, because a test that leaves the instance looking
+    // like it has no recent backup makes the health endpoint (and anyone reading
+    // the console) believe something that is not true.
+    const verified = (await db.execute(
+      sql`select id, finished_at from backup_runs where status = 'verified'`,
+    )) as unknown as { rows: { id: string; finished_at: string | Date }[] };
+
     try {
+      await db.execute(sql`update backup_runs set finished_at = now() - interval '40 hours' where status = 'verified'`);
+
       const stale = await service.checkBackupFreshness();
       expect(stale.stale).toBe(true);
       expect(stale.ageHours!).toBeGreaterThan(stale.thresholdHours);
@@ -344,7 +351,11 @@ describe.skipIf(!DB)("platform backups — capture, verify, restore drill, reten
       expect(alerts.rows.length).toBeGreaterThan(0);
       expect(alerts.rows[0]!.severity).toBe("critical");
     } finally {
-      await db.execute(sql`update backup_runs set finished_at = now() where id = ${runId}::uuid`);
+      for (const row of verified.rows) {
+        await db.execute(
+          sql`update backup_runs set finished_at = ${new Date(row.finished_at)} where id = ${row.id}::uuid`,
+        );
+      }
     }
 
     // and the alert clears once a verified run is inside the window again
@@ -354,6 +365,5 @@ describe.skipIf(!DB)("platform backups — capture, verify, restore drill, reten
       sql`select count(*)::int as n from platform_alerts where kind = 'backup_stale' and status = 'open'`,
     )) as unknown as { rows: { n: number }[] };
     expect(Number(open.rows[0]!.n)).toBe(0);
-    void backupRuns;
   }, 120_000);
 });

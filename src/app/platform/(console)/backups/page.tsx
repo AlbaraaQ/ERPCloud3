@@ -24,7 +24,8 @@ import {
   backupRestoreAction,
   backupVerifyAction,
 } from "@/modules/platform/actions";
-import { ActionForm, Badge, Field, StatCard, Table, fmtBytes, fmtDate, statusTone } from "../../ui";
+import { ActionForm, Badge, Field, StatCard, Table } from "../../ui";
+import { fmtBytes, fmtDate, statusTone } from "../../format";
 
 export const dynamic = "force-dynamic";
 

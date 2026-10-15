@@ -91,13 +91,18 @@ export function SubmitButton({
 }
 
 /** `useActionState` wrapper so every console form reports success or an error key. */
+/**
+ * Form wrapper for console mutations. `hint` is a plain node, not a render
+ * function: a Server Component may pass children to a Client Component, but a
+ * function prop cannot cross that boundary (React refuses to serialize it).
+ */
 export function ActionForm({
   action,
   children,
   className,
   hidden,
   confirm,
-  render,
+  hint,
   submitLabel,
 }: {
   action: (state: PlatformFormState, formData: FormData) => Promise<PlatformFormState>;
@@ -105,7 +110,7 @@ export function ActionForm({
   className?: string;
   hidden?: Record<string, string>;
   confirm?: string;
-  render?: (state: PlatformFormState) => ReactNode;
+  hint?: ReactNode;
   submitLabel?: ReactNode;
 }) {
   const [state, formAction] = useActionState(action, { ok: false } as PlatformFormState);
@@ -124,7 +129,7 @@ export function ActionForm({
           text={(t as unknown as Record<string, string>)[state.okKey.split(".")[1] ?? ""] ?? t.saved}
         />
       ) : null}
-      {render?.(state)}
+      {hint}
     </form>
   );
 }
@@ -226,50 +231,3 @@ export function Table({ head, children }: { head: ReactNode[]; children: ReactNo
   );
 }
 
-export function fmtBytes(n: number | null | undefined): string {
-  if (!n) return "—";
-  const units = ["B", "KB", "MB", "GB"];
-  let v = n;
-  let i = 0;
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024;
-    i += 1;
-  }
-  return `${v.toFixed(v < 10 && i > 0 ? 1 : 0)} ${units[i]}`;
-}
-
-export function fmtDate(d: Date | string | null | undefined): string {
-  if (!d) return "—";
-  const date = typeof d === "string" ? new Date(d) : d;
-  return new Intl.DateTimeFormat("en-GB", { dateStyle: "short", timeStyle: "short" }).format(date);
-}
-
-export function statusTone(status: string): "muted" | "success" | "warning" | "danger" | "info" {
-  switch (status) {
-    case "active":
-    case "verified":
-    case "uploaded":
-    case "passed":
-    case "ready":
-    case "purged":
-      return "success";
-    case "trial":
-    case "local_ok":
-    case "running":
-    case "cooling_off":
-    case "requested":
-    case "queued":
-      return "info";
-    case "suspended":
-    case "failed":
-    case "expired":
-    case "warning":
-      return "warning";
-    case "deactivated":
-    case "pruned":
-    case "critical":
-      return "danger";
-    default:
-      return "muted";
-  }
-}

@@ -13,7 +13,8 @@ import { listTenants } from "@/modules/platform/tenants";
 import { listPlans } from "@/modules/platform/plans";
 import { getSettings } from "@/modules/platform/settings";
 import { tenantCreateAction } from "@/modules/platform/actions";
-import { ActionForm, Badge, Field, Table, fmtDate, statusTone } from "../../ui";
+import { ActionForm, Badge, Field, Table } from "../../ui";
+import { fmtDate, statusTone } from "../../format";
 
 export const dynamic = "force-dynamic";
 

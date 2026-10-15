@@ -13,7 +13,8 @@ import { eq, sql } from "drizzle-orm";
 import { getLocale, getDict } from "@/i18n";
 import { requirePlatformPermission, getPlatformContext } from "@/modules/platform/context";
 import { alertAcknowledgeAction } from "@/modules/platform/actions";
-import { ActionForm, Badge, StatCard, Table, fmtDate, statusTone } from "../../ui";
+import { ActionForm, Badge, StatCard, Table } from "../../ui";
+import { fmtDate, statusTone } from "../../format";
 
 export const dynamic = "force-dynamic";
 

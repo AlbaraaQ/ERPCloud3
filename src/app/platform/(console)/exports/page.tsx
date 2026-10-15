@@ -15,7 +15,8 @@ import { requirePlatformPermission, getPlatformContext } from "@/modules/platfor
 import { listTenants } from "@/modules/platform/tenants";
 import { getSettings } from "@/modules/platform/settings";
 import { exportBuildAction, deletionLegalHoldAction, deletionRequestAction, deletionPurgeAction } from "@/modules/platform/actions";
-import { ActionForm, Badge, Field, Table, fmtBytes, fmtDate, statusTone } from "../../ui";
+import { ActionForm, Badge, Field, Table } from "../../ui";
+import { fmtBytes, fmtDate, statusTone } from "../../format";
 
 export const dynamic = "force-dynamic";
 

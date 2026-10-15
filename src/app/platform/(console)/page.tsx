@@ -29,7 +29,8 @@ import type { PlatformContext } from "@/modules/platform/context";
 function actorLabelOf(ctx: PlatformContext | null): string {
   return ctx ? `${ctx.name} <${ctx.email}>` : "platform";
 }
-import { Badge, StatCard, fmtBytes, fmtDate, statusTone } from "../ui";
+import { Badge, StatCard } from "../ui";
+import { fmtBytes, fmtDate, statusTone } from "../format";
 
 export const dynamic = "force-dynamic";
 
@@ -63,7 +64,7 @@ export default async function PlatformDashboard() {
         select coalesce(sum(p.price_monthly), 0)::text as mrr,
                count(*)::int as live
         from subscriptions s join plans p on p.code = s.plan_code
-        where s.status in ('trial','active')`),
+        where s.status in ('trialing','active')`),
       db
         .select({ metric: usageMetrics.metric, total: sql<string>`sum(${usageMetrics.value})` })
         .from(usageMetrics)

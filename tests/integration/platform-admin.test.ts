@@ -108,8 +108,6 @@ describe.skipIf(!DB)("platform admin — boundaries and lifecycle", () => {
 
   afterAll(async () => {
     if (!db) return;
-    const { platformUsers } = await import("@/db/schema");
-    const { eq } = await import("drizzle-orm");
     // Test teardown removes the throwaway tenant with the same routine the purge
     // workflow uses (all tenant rows, then the tenant) — a bare `delete from
     // tenants` would leave orphaned children behind, and a backup containing them
@@ -118,8 +116,14 @@ describe.skipIf(!DB)("platform admin — boundaries and lifecycle", () => {
       const { deleteTenantRows } = await import("@/modules/platform/exports");
       await db.transaction((trx) => deleteTenantRows(trx, throwawayTenantId)).catch(() => undefined);
     }
-    await db.delete(platformUsers).where(eq(platformUsers.id, ownerId)).catch(() => undefined);
-    await db.delete(platformUsers).where(eq(platformUsers.id, opsId)).catch(() => undefined);
+    // Operator accounts are retired, never hard-deleted: their ids are referenced
+    // by the append-only audit chain (a delete hits a foreign key, and "fixing"
+    // that would erase accountability). Disabled + signed out is the real-world
+    // teardown, and it keeps the console's user store free of live test accounts.
+    for (const id of [ownerId, opsId].filter((value) => value)) {
+      await db.execute(sql`delete from sessions where platform_user_id = ${id}::uuid`).catch(() => undefined);
+      await db.execute(sql`update platform_users set status = 'disabled' where id = ${id}::uuid`).catch(() => undefined);
+    }
   });
 
   it("owner cannot log in without enrolling 2FA, and enrolment never stores an unverified secret", async () => {
@@ -238,6 +242,85 @@ describe.skipIf(!DB)("platform admin — boundaries and lifecycle", () => {
           where p.code like 'platform.%'`,
     );
     expect(Number(roleHits[0]!.n)).toBe(0);
+  });
+
+  it("every console screen asks for a permission the catalog actually defines", async () => {
+    // A screen that requires an undefined code throws for every role — including
+    // the owner — so this is a 500 waiting to happen rather than a policy choice.
+    const { readdir, readFile } = await import("node:fs/promises");
+    const path = await import("node:path");
+    const { join } = path;
+    const { existsSync } = await import("node:fs");
+
+    const files: string[] = [];
+    const walk = async (dir: string): Promise<void> => {
+      for (const entry of await readdir(dir, { withFileTypes: true })) {
+        const path = join(dir, entry.name);
+        if (entry.isDirectory()) await walk(path);
+        else if (/\.tsx?$/.test(entry.name)) files.push(path);
+      }
+    };
+    await walk("src/app/platform");
+
+    const requested = new Map<string, string>();
+    for (const file of files) {
+      const text = await readFile(file, "utf8");
+      for (const match of text.matchAll(/requirePlatformPermission\([^,]+,\s*"([^"]+)"\)/g)) {
+        requested.set(match[1]!, file);
+      }
+    }
+    expect(requested.size, "the console must declare the screens it guards").toBeGreaterThan(4);
+
+    const known = new Set<string>(permissions.PLATFORM_PERMISSIONS as readonly string[]);
+    const unknown = [...requested].filter(([code]) => !known.has(code)).map(([code, file]) => `${code} (${file})`);
+    expect(unknown, `console screens require permissions the catalog does not define: ${unknown.join(", ")}`).toEqual([]);
+
+    // reading is separate from changing, and the operator role must be able to
+    // open every screen it is shown (a viewer that cannot view is a broken role)
+    const ops = permissions.platformPermissionsFor("ops");
+    const viewsNotGranted = [...known].filter((code) => code.endsWith(".view") && !ops.has(code));
+    expect(viewsNotGranted, `ops cannot open: ${viewsNotGranted.join(", ")}`).toEqual([]);
+
+    const owner = permissions.platformPermissionsFor("owner");
+    expect([...known].filter((code) => !owner.has(code))).toEqual([]);
+
+    // A Server Component may *render* a client component, but a plain function
+    // (formatter, helper) living in a "use client" module cannot cross that
+    // boundary: importing it is accepted by the type checker and fails at
+    // runtime with "Functions cannot be passed directly to Client Components".
+    const isClientModule = (text: string): boolean =>
+      /^\s*("use client"|'use client')/m.test(text.split("\n").slice(0, 8).join("\n"));
+
+    const clientModules = new Set<string>();
+    for (const file of files) {
+      if (isClientModule(await readFile(file, "utf8"))) clientModules.add(path.resolve(file));
+    }
+    expect(clientModules.size, "the console has client components").toBeGreaterThan(0);
+
+    const serverPages = files.filter((f) => /page\.tsx$/.test(f) && !clientModules.has(path.resolve(f)));
+    expect(serverPages.length, "the console has server pages").toBeGreaterThan(3);
+
+    const leaked: string[] = [];
+    for (const page of serverPages) {
+      const text = await readFile(page, "utf8");
+      for (const match of text.matchAll(/import (?<type>type )?\{([^}]*)\} from "([^"]+)";/g)) {
+        if (match.groups?.type) continue;
+        if (!match[3]!.startsWith(".")) continue;
+        const target = path.resolve(path.dirname(page), match[3]!);
+        const resolved = [target, `${target}.tsx`, `${target}.ts`, path.join(target, "index.ts")]
+          .find((candidate) => files.includes(candidate) || existsSync(candidate));
+        if (!resolved || !clientModules.has(path.resolve(resolved))) continue;
+        for (const raw of match[2]!.split(",")) {
+          const name = raw.trim().split(/\s+as\s+/)[0]!.trim();
+          if (!name) continue;
+          // components travel fine; lower-case values (helpers, formatters) do not
+          if (!/^[A-Z]/.test(name.replace(/^type\s+/, ""))) {
+            leaked.push(`${name} (${page} ← ${match[3]})`);
+          }
+        }
+      }
+    }
+    expect(leaked, `server pages import values from client modules: ${leaked.join(", ")}`).toEqual([]);
   });
 
   it("platform users live in their own store: no tenant_id column exists on platform_users", async () => {

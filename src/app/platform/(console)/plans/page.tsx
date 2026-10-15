@@ -12,7 +12,8 @@ import { getLocale, getDict } from "@/i18n";
 import { requirePlatformPermission, getPlatformContext } from "@/modules/platform/context";
 import { KNOWN_FEATURES, subscriptionsDue } from "@/modules/platform/plans";
 import { listTenants } from "@/modules/platform/tenants";
-import { Badge, Table, fmtDate } from "../../ui";
+import { Badge, Table } from "../../ui";
+import { fmtDate } from "../../format";
 
 export const dynamic = "force-dynamic";
 

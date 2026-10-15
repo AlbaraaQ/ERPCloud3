@@ -29,7 +29,8 @@ import {
   tenantStatusAction,
 } from "@/modules/platform/actions";
 import { GRANTABLE_SCREENS } from "@/modules/platform/permissions";
-import { ActionForm, Badge, Field, Table, fmtBytes, fmtDate, statusTone } from "../../../ui";
+import { ActionForm, Badge, Field, Table } from "../../../ui";
+import { fmtBytes, fmtDate, statusTone } from "../../../format";
 
 export const dynamic = "force-dynamic";
 
@@ -141,7 +142,7 @@ export default async function TenantDetailPage({ params }: { params: Promise<{ i
           action={tenantStatusAction}
           className="card p-4"
           submitLabel={t.save}
-          render={() => <p className="mt-2 text-[11px] text-muted">{t.lifecycleHint}</p>}
+          hint={<p className="mt-2 text-[11px] text-muted">{t.lifecycleHint}</p>}
         >
           <h2 className="mb-3 text-sm font-bold">{t.lifecycle}</h2>
           <input type="hidden" name="tenantId" value={id} />

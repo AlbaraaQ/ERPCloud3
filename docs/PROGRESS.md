@@ -4,6 +4,99 @@
 append-only per session, **newest first**; keep them factual — commands and results
 exactly as observed.
 
+## Session 10 — 2026-10-16 · Phase 8 (platform administration & backups) implemented, console reachable end-to-end
+
+### Status: Phase 8 implemented ✅ · AC-030 recorded as environment-limited (pg_dump / off-site) · 4 documented residuals
+
+> **Honesty note:** a backup run is labelled `verified` only after its artifact was re-read
+> and checksum-matched; a check that cannot run is `skipped`, never a pass. The console shows
+> counts, statuses and **declared** plan prices — never a tenant amount. Remote upload in this
+> sandbox runs the explicit `local-contract` transport and is not presented as off-site storage.
+
+### Work completed
+
+1. **Platform tier** (`src/modules/platform/`): separate user store + roles (`owner`, `ops`),
+   own session namespace (`hisab_platform_session`, 8 h) that refuses tenant tokens and vice
+   versa, mandatory TOTP for owners, login throttling (5/300 s email, 20/300 s IP, 15-min
+   lockout), 21 permission codes split view/manage, append-only hash-chained
+   `platform_audit_log` with a `verify_platform_audit_chain()` re-check.
+2. **Tenant lifecycle** `create → trial → active ⇄ suspended → deactivated`, implemented as
+   *status*, never as deletion: suspension flips the tenant to read-only at the transaction
+   level (read-only transaction + `app.read_only` restrictive RLS) so history stays visible and
+   exportable. `purgeTenant` (request → export offer → typed confirmation → cooling-off →
+   legal hold → certificate) is the only path that removes rows, and it is the only caller of
+   `deleteTenantRows` (FK join sweep → every `tenant_id` table → `tenants`).
+3. **Plans, entitlements, quotas, flags**: entitlements resolved per tenant, `assertQuota` at
+   the write boundary with a warning band (`{metric,limit,used,increment}` in the error meta),
+   global and per-tenant flags that take effect immediately and are audited.
+4. **Backups** (`backup/{snapshot,crypto,invariants,pgdump,drive,service}.ts`): capture inside a
+   single `repeatable read, read only` transaction; AES-256-GCM artifacts; a per-table content
+   hash and the plaintext sha256 in `backup_runs`; `verifyBackup` stages
+   `artifact_present | artifact_checksum | decrypt | plaintext_checksum | content |
+   referential_integrity | remote`; pruning by retention class; freshness as a **blocker** in
+   `/api/health`; `runRestoreDrill` restores into an isolated `restore_drill_*` schema, checks
+   7 invariants (133 FKs, 227 RLS policies) and drops the schema.
+5. **Console** (`/platform`): dashboard, tenants + tenant detail (lifecycle, plan, flags,
+   quotas, grants, exports, deletion, per-tenant audit), plans, flags, backups, alerts
+   (acknowledge/assign), audit trail, exports. Break-glass support grants (approver chain,
+   scope, ≤24 h, masking, exports blocked, every view audited, tenant-visible); tenant export
+   bundles (manifest v1 + sha256 + expiring token, checksum re-verified on download).
+6. **Defect sweep of the console itself** (found by HTTP smoke, not by types): all console
+   pages returned `500` for an `ops` session because pages requested permission codes that did
+   not exist (`platform.plans.view`, `platform.flags.view`, `platform.backups.view`,
+   `platform.alerts.view`, `platform.exports.view`); server pages imported **values** from
+   `"use client"` modules (`fmtDate`, `statusTone`, `fmtBytes` — "Functions cannot be passed
+   directly to Client Components"); a client function was passed as the `render` prop from a
+   server page; and the dashboard queried `subscriptions.status in ('trial','active')` while
+   the enum value is `trialing`. All fixed; the shared formatters now live in
+   `src/app/platform/format.ts` (no `"use client"`), and a test locks the boundary
+   (`platform-admin.test.ts` → "every console screen asks for a permission the catalog
+   actually defines": codes exist, `ops` can open every screen, owner holds everything, and no
+   server page imports a lower-case value from a client module).
+7. **Hygiene**: the tenant permission catalog must not carry `platform.*` codes (platform
+   roles are not tenant permissions) — seed reconciles both stale grants and stale rows; test
+   teardown **retires** operator accounts (disabled + signed out) instead of hard-deleting them,
+   because their ids are referenced by the append-only audit chain.
+
+### Commands executed → results
+
+- `npm test` → **17 files passed | 134 passed | 8 skipped (142) | 0 failed**; `npx tsc --noEmit` clean; `npx next build` succeeded (41 s, all routes rendered).
+- `npx tsx scripts/platform-backup.mts run` → `verified`, `logical-json`, 75 tables / 4387 rows, plaintext 2 042 346 B, artifact 2 723 179 B, plaintext sha256 `2cf99a0c…`, artifact sha256 `b065e0e8…`, remote `local-contract`, 731 ms.
+- `GET /api/health` → `200 {"ok":true,"db":true,"worker":{"status":"stopped"},"backup":{"state":"fresh","ageHours":0,"thresholdHours":8,"blocker":false},"blockers":[]}` (was `503 backup_stale`, caused by a test that never restored timestamps — fixed with `try`/`finally`).
+- Console smoke over HTTP with a live platform session: `/platform`, `/tenants`, `/tenants/[id]`, `/plans`, `/flags`, `/backups`, `/alerts`, `/audit`, `/exports` → **all 200**; without a session → `307 /platform/login`; `/api/platform/export/[id]` → `401` unauthenticated, `400 errors.notFound` for an unknown id.
+
+### Incidents fixed with lasting rules
+
+- **Types cannot see the Server/Client boundary.** A server page importing a formatter from a
+  `"use client"` module compiles and 500s at runtime; the same is true for function props.
+- **A permission code that does not exist is indistinguishable from a denial** — and it denies
+  the owner too. Codes requested by the console are now asserted against the catalog, and
+  `ops` must be able to *open* every screen it can see.
+- **Reading and changing are separate rights**: `.view` codes exist for every screen; `ops`
+  never gets a destructive one.
+- **Test teardown must respect the invariants it tests**: hard-deleting an operator account
+  fails the audit FK (and would erase accountability) — retire it instead.
+- **A test that mutates global rows must restore them** (backup freshness left the live
+  instance `stale` for 40 h; now captured and restored in `finally`).
+- **Platform-scoped tables must be excluded from tenant partitioning checks** — mirrored at
+  capture time (`isPlatformScopedCapture`) so the invariant and the capture agree.
+
+### Residuals moved forward (explicitly not done)
+
+1. `pg_dump --format=custom` path unexecuted here (no client binaries); every run records
+   `format = logical-json`.
+2. Remote backup is the `local-contract` transport — no Google Drive credentials, so **no
+   off-site backup claim**.
+3. Console mutations are driven at the module layer in tests; no browser-level form post was
+   exercised (no browser in the sandbox) — the exports download route was exercised over HTTP.
+4. `/platform` is reachable in the preview but the seeded owner must enrol TOTP before first
+   sign-in; tenant-side ZATCA residuals (AC-025, OQ-2/3/4) are unchanged.
+
+### Exact next step (Phase 9)
+
+AI assistant per roadmap: provider adapters, permission-aware read-only tool registry, approval
+tickets for mutations, conversation/tool audit, privacy data-minimization table.
+
 ## Session 9 — 2026-10-16 · Phase 7 (reporting & reconciliation) implemented, catalog wired to the app
 
 ### Status: Phase 7 implementation COMPLETE for the reports whose sources exist ✅ · 2 documented residuals (see below)

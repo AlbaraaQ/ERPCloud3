@@ -74,6 +74,8 @@ integration → `next build`. E2E before releases. Coverage target ≥ 80% lines
 | AC-034 | Rep offline limits enforced (count/value/credit/age) with correct block UX | int+e2e | FR-054, OS §6 |
 | AC-035 | Reprint does not mutate doc/timestamps; copies labeled; draft watermark | unit+e2e | INV-12, IZ §8 |
 | AC-036 | Session/device: expiry, revocation blocks sync, audit events present | api | SEC §3/§7 |
+| AC-037 | Platform console: every mutation lands in the append-only hash-chained `platform_audit_log`, and the chain re-verifies | int | PLATFORM §6 |
+| AC-038 | Console isolation: no tenant role reaches `/platform`; no platform permission reads tenant books without a live grant; console pages resolve for both roles | int + smoke | PLATFORM §1/§5 |
 
 ### 3.1 AC-025 — ZATCA end-to-end, recorded honestly
 
@@ -147,6 +149,51 @@ What the suite proves, and how it avoids self-confirmation:
 **Chaos fixture** (shared): seeded tenant with sales/returns/reversals/free goods/
 transfers/partial receipts/discrepancies/expenses/settlement exceptions/production runs —
 used by AC-019/031 and report tests so formulas are proven against messy real data.
+
+### 3.3 Phase 8 — platform administration & backups (AC-030, AC-033, AC-037, AC-038)
+
+**Executed evidence** (`platform-admin.test.ts` 13 tests, `platform-backup.test.ts` 6 tests,
+`npm test` 17 files / 134 passed / 8 skipped / 0 failed; console smoke over HTTP):
+
+1. **Backup → verify → restore drill (AC-030).** `platform-backup.test.ts` runs the real
+   path: capture inside one `repeatable read, read only` transaction, encrypt (AES-256-GCM),
+   write the artifact, re-read it, decrypt, checksum-match the plaintext, then `verify`
+   records `verified` **only** after the artifact was re-read and matched — a run whose
+   artifact changed afterwards is `failed`, never silently `verified`. The drill restores
+   into an isolated `restore_drill_*` schema, re-checks 7 invariants (including
+   `referential_integrity` over 133 FKs and `isolation` over 227 RLS policies), compares
+   per-tenant row counts against the values the capture itself claims, and drops the schema.
+   A deliberately sabotaged copy (one business row moved to the other tenant, artifact
+   re-hashed so the file is self-consistent) still fails `tenant_partitioning`, with the
+   detail naming the tenant and both counts.
+2. **Suspension preserves history (AC-033).** The drill and the admin suite assert that a
+   suspended tenant keeps every row, that writes are refused at the transaction level
+   (`25006`, read-only transaction + `app.read_only` RLS), and that nothing is deleted:
+   status changes only. Deletion exists solely as an explicit workflow
+   (request → export offer → typed confirmation → cooling-off → legal hold → purge) and
+   `purgeTenant` is the only code path that removes rows.
+3. **Platform cannot read tenant books (AC-033/AC-038).** Every platform data-layer query
+   in the suite is checked to select identity/status/count columns only; the console renders
+   counts, statuses, MRR **declared** in the plan price and backup figures. Reading tenant
+   content (or building an export bundle) requires an approved, unexpired, screen-scoped
+   support grant, and every use is written to both chains. Impersonation does not exist.
+4. **Every console mutation is audited (AC-037).** The suite performs the console mutations
+   (tenant create/status/plan, flag set, alert acknowledge, grant request/approve/revoke,
+   export build, backup verify/prune, retention policy) and asserts each action appears in
+   `platform_audit_log`, that the chain re-verifies, and that the append-only trigger
+   refuses `UPDATE`/`DELETE` (`23001`).
+5. **Console isolation & reachability (AC-038).** Over HTTP: `/platform*` without a session
+   → `307 /platform/login`; `/platform/login` → `200`; a tenant user's cookie grants
+   nothing. With a platform session, all nine console routes return `200`
+   (`/platform`, `/tenants`, `/tenants/[id]`, `/plans`, `/flags`, `/backups`, `/alerts`,
+   `/audit`, `/exports`) and `/api/platform/export/[id]` returns `401` without a session
+   and `400 errors.notFound` for an unknown id.
+
+**Recorded limits.** The `pg_dump --format=custom` path cannot execute here (no
+`pg_dump`/`pg_restore`/`psql` on `PATH`, no `/usr/lib/postgresql`): every run in this
+sandbox records `format = logical-json`, and the runner picks the custom path wherever the
+binary exists. Remote upload runs the explicit `local-contract` transport — it is **not**
+Google Drive and is not presented as off-site storage.
 
 ## 4. Security & concurrency suites
 

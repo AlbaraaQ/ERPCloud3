@@ -5,7 +5,7 @@ not verified working and tested. Every phase ends with: tests executed, docs upd
 `docs/PROGRESS.md` appended, and the full validation gate
 (`next typegen` → `tsc --noEmit` → `next build` → platform `build_and_start`) passing.
 
-**Current pointer:** Phases 0–6 ✅ complete (AC-025 environment-limited) · **Phase 7 implemented** — accounting/sales/inventory/tax reports + RL-1…RL-5 integrity banner, CSV export, role-aware dashboard; residuals listed in `PROGRESS.md` Session 9 → **Phase 8 next**.
+**Current pointer:** Phases 0–7 ✅ complete (AC-025 environment-limited) · **Phase 8 implemented** — `/platform` console (tenants, plans/entitlements, flags, quotas, alerts, audit, exports), verified backups + restore drills, support grants, deletion workflow; residuals listed in `PROGRESS.md` Session 10 → **Phase 9 (AI assistant) next**.
 
 ---
 
@@ -100,7 +100,7 @@ Implement REPORTING_SPECIFICATION.md catalog in priority order (GL/trial balance
 
 **Exit:** every report reconciles with authoritative ledgers (automated reconciliation tests); no double-counting under reversal fixtures.
 
-## Phase 8 — Platform administration & backups
+## Phase 8 — Platform administration & backups ✅ (implemented 2026-10-16; evidence in PROGRESS.md Session 10, AC-030/033/037/038)
 
 **Depends on:** Phases 1–6 exist to operate on.
 
@@ -108,7 +108,12 @@ Implement REPORTING_SPECIFICATION.md catalog in priority order (GL/trial balance
 2. Backup automation (4 h schedule, encryption, checksums, Drive upload w/ verification), retention (≥18 + optional GFS), stale-backup monitor, restore-runbook + isolated restore drill with evidence.
 3. Platform health/jobs/backup dashboards, rate limits, break-glass support access (time-boxed, audited), tenant export/deletion workflows.
 
-**Exit:** backup→verify→restore drill succeeds in isolation and is documented; suspension preserves read-only history (test); platform admin cannot read tenant financial data by default (test).
+**Exit:** backup→verify→restore drill succeeds in isolation and is documented ✅ (7 invariants;
+`pg_dump` path unavailable here → every run records the format it really used) · suspension
+preserves read-only history ✅ (test; writes refused at transaction level, nothing deleted) ·
+platform admin cannot read tenant financial data by default ✅ (test: platform queries select
+identity/status/counts; reading content needs an approved grant) · console isolated from tenant
+sessions ✅ (HTTP smoke + tests).
 
 ## Phase 9 — AI assistant
 

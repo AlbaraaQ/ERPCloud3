@@ -1,5 +1,6 @@
 {
-  "name": "nextjs-postgresql-template",
+  "name": "hisab-erp",
+  "version": "0.8.0",
   "private": true,
   "scripts": {
     "test": "vitest run --no-file-parallelism",

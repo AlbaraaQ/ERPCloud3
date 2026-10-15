@@ -12,7 +12,8 @@ import { desc, sql } from "drizzle-orm";
 import { getLocale, getDict } from "@/i18n";
 import { requirePlatformPermission, getPlatformContext } from "@/modules/platform/context";
 import { verifyAuditChain } from "@/modules/platform/audit";
-import { Badge, StatCard, Table, fmtDate } from "../../ui";
+import { Badge, StatCard, Table } from "../../ui";
+import { fmtDate } from "../../format";
 
 export const dynamic = "force-dynamic";
 

@@ -12,6 +12,7 @@ import { db, pool } from "@/db";
 import { sql } from "drizzle-orm";
 import { getWorkerStatus } from "@/modules/jobs/worker";
 import { backupFreshness } from "@/modules/platform/backup/service";
+import pkg from "../../../../package.json";
 import { logger } from "@/modules/shared/logger";
 
 export const dynamic = "force-dynamic";
@@ -68,7 +69,10 @@ export async function GET() {
       pool: { total: pool.totalCount, idle: pool.idleCount, waiting: pool.waitingCount },
       latencyMs: Date.now() - started,
       time: new Date().toISOString(),
-      phase: "8-platform",
+      // Identity the caller can trust: read from package.json at build time,
+      // never a hand-written string that drifts from what is deployed.
+      app: pkg.name,
+      version: pkg.version,
     },
     { status: ok ? 200 : 503 },
   );
