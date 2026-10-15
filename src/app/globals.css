@@ -1,0 +1,157 @@
+@import "@fontsource/ibm-plex-sans-arabic/400.css";
+@import "@fontsource/ibm-plex-sans-arabic/500.css";
+@import "@fontsource/ibm-plex-sans-arabic/600.css";
+@import "@fontsource/ibm-plex-sans-arabic/700.css";
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Design tokens (UX_AND_DESIGN_SYSTEM §2) — light theme */
+:root {
+  --background: #f5f7f9;
+  --surface: #ffffff;
+  --surface-2: #f0f3f6;
+  --surface-3: #e7ecf1;
+  --border: #e2e8ee;
+  --border-strong: #c9d3dc;
+  --foreground: #14202b;
+  --muted: #5d6b7a;
+  --primary: #0f766e;
+  --primary-hover: #115e59;
+  --primary-foreground: #ffffff;
+  --primary-soft: #d7efec;
+  --success: #047857;
+  --success-soft: #d1f2e5;
+  --warning: #b45309;
+  --warning-soft: #fdeacc;
+  --danger: #b91c1c;
+  --danger-soft: #fbdcdc;
+  --info: #1d4ed8;
+  --info-soft: #dbe7fe;
+  --ring: #14b8a6;
+  --shadow-color: 210 25% 12%;
+}
+
+/* dark theme */
+.dark {
+  --background: #0a0e13;
+  --surface: #10161e;
+  --surface-2: #151d27;
+  --surface-3: #1c2632;
+  --border: #232e3b;
+  --border-strong: #324154;
+  --foreground: #e8edf3;
+  --muted: #94a2b3;
+  --primary: #2dd4bf;
+  --primary-hover: #5eead4;
+  --primary-foreground: #052e29;
+  --primary-soft: #0c3a35;
+  --success: #34d399;
+  --success-soft: #06392b;
+  --warning: #fbbf24;
+  --warning-soft: #43300a;
+  --danger: #f87171;
+  --danger-soft: #4a1717;
+  --info: #60a5fa;
+  --info-soft: #12284d;
+  --ring: #2dd4bf;
+  --shadow-color: 210 40% 2%;
+}
+
+@theme inline {
+  --font-sans: "IBM Plex Sans Arabic", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-primary: var(--primary);
+  --color-primary-hover: var(--primary-hover);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary-soft: var(--primary-soft);
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-info: var(--info);
+  --color-info-soft: var(--info-soft);
+  --color-ring: var(--ring);
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+  html {
+    scroll-behavior: smooth;
+  }
+  body {
+    background: var(--background);
+    color: var(--foreground);
+    font-feature-settings: "tnum" 1;
+  }
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+  /* numeric keypads & money remain tabular */
+  .tnum {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@layer utilities {
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 0.875rem;
+    box-shadow: 0 1px 2px hsl(var(--shadow-color) / 0.05);
+  }
+  .input {
+    width: 100%;
+    border-radius: 0.75rem;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    padding: 0.625rem 0.875rem;
+    font-size: 0.925rem;
+    transition: border-color 120ms ease, box-shadow 120ms ease;
+  }
+  .input:focus {
+    outline: none;
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 18%, transparent);
+  }
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    border-radius: 0.75rem;
+    font-weight: 600;
+    font-size: 0.925rem;
+    padding: 0.625rem 1.125rem;
+    transition: background-color 120ms ease, color 120ms ease, transform 80ms ease;
+  }
+  .btn:active {
+    transform: translateY(1px);
+  }
+  .btn-primary {
+    background: var(--primary);
+    color: var(--primary-foreground);
+  }
+  .btn-primary:hover {
+    background: var(--primary-hover);
+  }
+  .btn-ghost {
+    background: transparent;
+    color: var(--foreground);
+  }
+  .btn-ghost:hover {
+    background: var(--surface-2);
+  }
+}
