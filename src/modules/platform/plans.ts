@@ -180,7 +180,7 @@ export async function captureUsageForTenant(
         (select count(*) from products where tenant_id = ${tenantId}::uuid)::int as products,
         (select count(*) from customers where tenant_id = ${tenantId}::uuid)::int as customers,
         (select count(*) from representatives
-          where tenant_id = ${tenantId}::uuid and status = 'active')::int as reps,
+          where tenant_id = ${tenantId}::uuid and active is true)::int as reps,
         (select count(*) from sales_invoices
           where tenant_id = ${tenantId}::uuid
             and business_date >= ${businessMonth.from} and business_date <= ${businessMonth.to}

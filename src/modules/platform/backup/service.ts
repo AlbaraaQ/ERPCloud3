@@ -714,6 +714,23 @@ export async function runRestoreDrill(opts: DrillOptions): Promise<DrillResult> 
     const restored = await restoreSnapshot(snapshot, { targetSchema: schema });
     const invariants = await runInvariants(snapshot, { targetSchema: schema });
 
+    // A restore that quietly loses indexes is not a restore, so the evidence says
+    // so explicitly instead of a log line nobody reads.
+    const indexTotal = snapshot.manifest.tables.reduce((sum, t) => sum + t.indexes.length, 0);
+    const indexesOk = restored.skippedIndexes.length === 0;
+    const indexCheck = {
+      name: "indexes",
+      ok: indexesOk,
+      skipped: indexTotal === 0,
+      detail: indexesOk
+        ? `${indexTotal} index(es) recreated`
+        : `${restored.skippedIndexes.length}/${indexTotal} index(es) could not be recreated: ${restored.skippedIndexes
+            .slice(0, 3)
+            .join("; ")}`,
+    };
+    const checks = [indexCheck, ...invariants.checks.map((c) => ({ name: c.name, ok: c.ok, detail: c.detail, skipped: c.skipped }))];
+    const drillOk = invariants.ok && indexesOk;
+
     let dropped = false;
     if (!opts.keepSchema) {
       await db.execute(sql.raw(`drop schema if exists "${schema}" cascade`));
@@ -724,14 +741,14 @@ export async function runRestoreDrill(opts: DrillOptions): Promise<DrillResult> 
     const result: DrillResult = {
       runId: run.id,
       schema,
-      status: invariants.ok ? "passed" : "failed",
+      status: drillOk ? "passed" : "failed",
       rows: restored.rows,
       tables: restored.tables,
       durationMs: finishedAt.getTime() - startedAt.getTime(),
       startedAt: startedAt.toISOString(),
       finishedAt: finishedAt.toISOString(),
       invariants,
-      checks: invariants.checks.map((c) => ({ name: c.name, ok: c.ok, detail: c.detail, skipped: c.skipped })),
+      checks,
     };
 
     await record(result.status, {
@@ -740,7 +757,7 @@ export async function runRestoreDrill(opts: DrillOptions): Promise<DrillResult> 
       rows: result.rows,
       tables: result.tables,
       durationMs: result.durationMs,
-      invariants: invariants.checks,
+      checks,
       rtoSeconds: Math.round(result.durationMs / 10) / 100,
     });
 
@@ -749,7 +766,7 @@ export async function runRestoreDrill(opts: DrillOptions): Promise<DrillResult> 
         severity: "critical",
         kind: "restore_drill_failed",
         title: "Restore drill failed",
-        body: `run ${run.id}: ${invariants.checks.filter((c) => !c.ok).map((c) => `${c.name} (${c.detail})`).join("; ").slice(0, 400)}`,
+        body: `run ${run.id}: ${checks.filter((c) => !c.ok).map((c) => `${c.name} (${c.detail})`).join("; ").slice(0, 400)}`,
         payload: { runId: run.id, schema },
       });
     } else {

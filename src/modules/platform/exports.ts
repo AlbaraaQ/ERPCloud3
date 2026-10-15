@@ -13,14 +13,14 @@
  */
 
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { eq, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { deletionRequests, tenantExports, tenants } from "@/db/schema";
 import { errors } from "@/modules/shared/result";
 import { newId } from "@/modules/shared/ids";
-import { appKey, randomToken, sha256Hex } from "@/modules/shared/crypto";
+import { appKey, sha256Hex } from "@/modules/shared/crypto";
 import { withTenant, type Trx } from "@/modules/shared/db-context";
 import { logger } from "@/modules/shared/logger";
 import { writePlatformAudit } from "./audit";
@@ -87,6 +87,28 @@ export interface ExportBuildResult {
 }
 
 /**
+ * Every export file that belongs to a tenant: the paths recorded in
+ * `tenant_exports` plus any file in the export directory whose name starts with
+ * the tenant id (the directory is per-instance, and a bundle is named
+ * `<tenantId>-<exportId>.json`).
+ */
+async function exportArtifactsForTenant(tenantId: string): Promise<string[]> {
+  const rows = await db
+    .select({ path: tenantExports.artifactPath })
+    .from(tenantExports)
+    .where(eq(tenantExports.tenantId, tenantId));
+  const found = new Set(rows.map((r) => r.path).filter((p): p is string => Boolean(p)));
+  try {
+    for (const name of await readdir(exportDirectory())) {
+      if (name.startsWith(`${tenantId}-`)) found.add(join(exportDirectory(), name));
+    }
+  } catch {
+    // no directory yet → nothing else to sweep
+  }
+  return [...found];
+}
+
+/**
  * Build a tenant bundle. `actorLabel` is recorded in the platform audit chain;
  * when the request came from the tenant itself, pass `requestedByUserId`.
  */
@@ -114,7 +136,13 @@ export async function buildTenantExport(input: {
   }
 
   const id = newId();
-  const token = randomToken();
+  const expiresAt = new Date(Date.now() + EXPORT_TTL_HOURS * 3600_000);
+  /**
+   * ONE token, minted in the form the download actually verifies: the HMAC binds
+   * the export id to its expiry (a leaked link dies on its own). Its hash is
+   * stored as well, so the same link can still be revoked from the database.
+   */
+  const token = exportToken(id, expiresAt.getTime());
   await db.insert(tenantExports).values({
     id,
     tenantId: input.tenantId,
@@ -123,7 +151,7 @@ export async function buildTenantExport(input: {
     requestedByPlatformUserId: input.requestedByPlatformUserId ?? null,
     requestedByLabel: input.actorLabel,
     downloadTokenHash: sha256Hex(token),
-    expiresAt: new Date(Date.now() + EXPORT_TTL_HOURS * 3600_000),
+    expiresAt,
   });
 
   try {
@@ -210,7 +238,7 @@ export async function buildTenantExport(input: {
       bytes: buffer.length,
       sha256: sha256Hex(buffer),
       token,
-      expiresAt: new Date(Date.now() + EXPORT_TTL_HOURS * 3600_000),
+      expiresAt,
       tables: manifest.tables,
     };
   } catch (e) {
@@ -287,8 +315,13 @@ export async function downloadTenantExport(input: {
     throw errors.validation("errors.exportExpired", "download link expired");
   }
   if (input.token) {
-    const verified = verifyExportToken(input.token);
-    if (!verified || verified.exportId !== row.id) {
+    // two ways in, both checked here: the signed link (id + expiry, verifiable
+    // without a database read) or the stored bearer token (revocable). A token
+    // that satisfies neither is refused — silently falling back to "console
+    // actor" would turn a broken link into unrestricted access.
+    const signed = verifyExportToken(input.token);
+    const bearer = Boolean(row.downloadTokenHash) && sha256Hex(input.token) === row.downloadTokenHash;
+    if (!((signed && signed.exportId === row.id) || bearer)) {
       throw errors.permission("errors.exportTokenInvalid", "invalid download token");
     }
   } else if (row.downloadTokenHash) {
@@ -404,6 +437,13 @@ export async function purgeTenant(input: {
 }): Promise<{ certificate: Record<string, unknown> }> {
   const [request] = await db.select().from(deletionRequests).where(eq(deletionRequests.id, input.requestId)).limit(1);
   if (!request) throw errors.notFound("deletion_request", input.requestId);
+  // The register outlives the tenant (tenant_id is nulled when it goes), so a
+  // request without a tenant is either already purged or a broken row — never a
+  // second purge.
+  if (request.status === "purged") {
+    throw errors.validation("errors.deletionAlreadyPurged", `request ${request.id} was already purged`);
+  }
+  if (!request.tenantId) throw errors.notFound("tenant", input.requestId);
   const [tenant] = await db.select().from(tenants).where(eq(tenants.id, request.tenantId)).limit(1);
   if (!tenant) throw errors.notFound("tenant", request.tenantId);
 
@@ -425,7 +465,23 @@ export async function purgeTenant(input: {
 
   const safety = await runBackup({ kind: "safety", actorLabel: input.actorLabel, skipRemote: true });
 
+  // An export bundle is a full copy of the tenant's data: if the tenant is being
+  // purged, its bundles must go too, or "deleted" would be a lie that survives on
+  // disk. Collected before the rows disappear (and swept by name afterwards as a
+  // backstop for bundles whose row was already removed).
+  const artifacts = await exportArtifactsForTenant(tenant.id);
+
   const counts = await db.transaction((trx) => deleteTenantRows(trx, tenant.id));
+
+  let removedArtifacts = 0;
+  for (const path of artifacts) {
+    try {
+      await unlink(path);
+      removedArtifacts += 1;
+    } catch (e) {
+      logger.warn({ err: e, path }, "export artifact could not be removed during purge");
+    }
+  }
 
   const certificate = {
     tenantId: tenant.id,
@@ -434,6 +490,7 @@ export async function purgeTenant(input: {
     safetyBackupRunId: safety.id,
     deletedRows: counts,
     totalDeleted: Object.values(counts).reduce((a, b) => a + b, 0),
+    exportArtifactsRemoved: removedArtifacts,
     actor: input.actorLabel,
   };
   await db
@@ -471,6 +528,10 @@ export async function purgeTenant(input: {
  * a half-purge would leave orphaned children pointing at a tenant that no longer
  * exists (which is exactly what a drill cannot restore).
  *
+ * Platform-wide tables are never touched: the audit chain, jobs and operator
+ * records are not tenant data, and a purge that erased them would destroy the
+ * evidence of the purge itself.
+ *
  * Must run inside a transaction (the replication-role switch is transaction-local).
  */
 export async function deleteTenantRows(trx: Trx, tenantId: string): Promise<Record<string, number>> {
@@ -494,13 +555,31 @@ export async function deleteTenantRows(trx: Trx, tenantId: string): Promise<Reco
            con.confrelid::regclass::text as parent_table,
            (select string_agg(quote_ident(a.attname), ', ' order by u.ord)
               from unnest(con.confkey) with ordinality u(attnum, ord)
-              join pg_attribute a on a.attrelid = con.confrelid and a.attnum = u.attnum) as parent_cols
+              join pg_attribute a on a.attrelid = con.confrelid and a.attnum = u.attnum) as parent_cols,
+           (con.confrelid = 'public.tenants'::regclass) as parent_is_tenant
       from pg_constraint con
      where con.contype = 'f' and con.connamespace = 'public'::regnamespace
+       -- the child carries no tenant_id, so it is reachable only through a parent…
        and not exists (select 1 from information_schema.columns c
                         where c.table_schema = 'public' and c.table_name = con.conrelid::regclass::text
                           and c.column_name = 'tenant_id')
-  `)) as unknown as { rows: { child_table: string; child_cols: string; parent_table: string; parent_cols: string }[] };
+       -- …and that parent must itself be tenant-scoped. Without this the sweep
+       -- happily writes p.tenant_id against platform_users and the purge dies on
+       -- 42703 — and platform-wide tables (the audit chain!) must never be swept
+       -- by a tenant purge in the first place.
+       and (con.confrelid = 'public.tenants'::regclass
+            or exists (select 1 from information_schema.columns pc
+                        where pc.table_schema = 'public' and pc.table_name = con.confrelid::regclass::text
+                          and pc.column_name = 'tenant_id'))
+  `)) as unknown as {
+    rows: {
+      child_table: string;
+      child_cols: string;
+      parent_table: string;
+      parent_cols: string;
+      parent_is_tenant: boolean;
+    }[];
+  };
 
   // a child can itself be a parent of another child, so sweep until it settles
   for (let pass = 0; pass < 5; pass += 1) {
@@ -508,12 +587,17 @@ export async function deleteTenantRows(trx: Trx, tenantId: string): Promise<Reco
     for (const link of links.rows) {
       const child = link.child_table.replace(/^public\./, "");
       const parent = link.parent_table.replace(/^public\./, "");
+      // platform-wide tables (audit chain, jobs, alerts metadata) are not tenant
+      // data: they survive the purge and are only removed by retention jobs
+      if (/^(platform_|pgboss)/.test(child)) continue;
+      // `tenants` has no tenant_id column of its own — it *is* the tenant
+      const predicate = link.parent_is_tenant ? `p.id = '${tenantId}'::uuid` : `p.tenant_id = '${tenantId}'::uuid`;
       const res = await trx.execute(
         sql.raw(`delete from public."${child}" c
                   where (${link.child_cols.split(",").map((c) => `c.${c.trim()}`).join(", ")})
                         in (select ${link.parent_cols.split(",").map((c) => `p.${c.trim()}`).join(", ")}
                               from public."${parent}" p
-                             where p.tenant_id = '${tenantId}'::uuid)`),
+                             where ${predicate})`),
       );
       const deleted = (res as unknown as { rowCount?: number }).rowCount ?? 0;
       if (deleted > 0) {
@@ -525,12 +609,24 @@ export async function deleteTenantRows(trx: Trx, tenantId: string): Promise<Reco
   }
 
   for (const { table_name } of tables.rows) {
+    // The deletion register is the opposite of tenant data: it holds the
+    // certificate, so it stays and its tenant_id is nulled by the FK below.
+    if (table_name === "deletion_requests") continue;
     const res = await trx.execute(
       sql.raw(`delete from public."${table_name}" where tenant_id = '${tenantId}'::uuid`),
     );
     const deleted = (res as unknown as { rowCount?: number }).rowCount ?? 0;
     if (deleted > 0) counts[table_name] = (counts[table_name] ?? 0) + deleted;
   }
+  // The register survives the tenant, so its references must be released by hand:
+  // `session_replication_role = replica` (set above) disables RI triggers, which
+  // means `on delete set null` will NOT fire for these rows — relying on it leaves
+  // dangling foreign keys that a later restore (rightly) refuses to rebuild.
+  await trx.execute(sql`
+    update public.deletion_requests
+       set tenant_id = null, export_id = null, updated_at = now()
+     where tenant_id = ${tenantId}::uuid
+  `);
   await trx.execute(sql`delete from public.tenants where id = ${tenantId}::uuid`);
   return counts;
 }

@@ -133,9 +133,14 @@ describe.skipIf(!DB)("platform backups — capture, verify, restore drill, reten
     const row = await service.getBackupRun(runId);
     expect(row!.drillStatus).toBe("passed");
     expect(row!.drillAt).toBeTruthy();
-    const detail = row!.drillDetail as { rows?: number; invariants?: unknown[] };
+    const detail = row!.drillDetail as { rows?: number; checks?: { name: string; ok: boolean }[] };
     expect(detail.rows).toBe(result.rows);
-    expect(Array.isArray(detail.invariants)).toBe(true);
+    expect(Array.isArray(detail.checks)).toBe(true);
+    // the recorded evidence covers the invariants AND the rebuild itself
+    expect(detail.checks!.map((c) => c.name)).toEqual(
+      expect.arrayContaining(["indexes", "row_counts", "referential_integrity"]),
+    );
+    expect(detail.checks!.find((c) => c.name === "indexes")!.ok).toBe(true);
 
     // the drill schema is gone (no leftovers in the live database)
     const leftovers = (await db.execute(

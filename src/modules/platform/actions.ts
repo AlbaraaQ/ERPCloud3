@@ -15,7 +15,7 @@
 import { cookies, headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { z } from "zod";
-import { PLATFORM_SESSION_COOKIE, PLATFORM_SESSION_TTL_MS } from "./session";
+import { PLATFORM_SESSION_COOKIE, PLATFORM_SESSION_TTL_MS, TOTP_PENDING_COOKIE } from "./session";
 import {
   confirmTotpEnrollment,
   platformLogin,
@@ -66,7 +66,7 @@ export interface PlatformFormState extends ActionResult {
   redirectTo?: string;
 }
 
-const TOTP_PENDING_COOKIE = "hisab_platform_2fa";
+
 
 async function meta(): Promise<{ ip: string | null; userAgent: string | null }> {
   const h = await headers();
@@ -444,16 +444,9 @@ export async function backupPolicyAction(
       driveFolderId: formData.get("driveFolderId")?.toString() || null,
       supportGrantMaxHours: Number(formData.get("grantMaxHours") ?? 24),
     };
-    const saved = await saveSettings(patch, platformActorLabel(ctx));
-    const { db } = await import("@/db");
-    await writePlatformAudit(db, {
-      actorPlatformUserId: ctx.platformUserId,
-      actorLabel: platformActorLabel(ctx),
-      action: "platform.settings_saved",
-      entity: "settings",
-      entityId: "platform",
-      after: saved as unknown as Record<string, unknown>,
-    });
+    // saved + audited in one place, so a console change and a scripted change
+    // leave the same evidence
+    await saveSettings(patch, platformActorLabel(ctx), ctx.platformUserId);
     return { ok: true, okKey: "platform.saved" };
   } catch (e) {
     return fail(e);

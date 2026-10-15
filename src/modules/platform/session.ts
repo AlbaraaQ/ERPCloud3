@@ -11,6 +11,13 @@ import { db } from "@/db";
 import { sessions } from "@/db/schema";
 import { hashToken } from "@/modules/identity/tokens";
 export const PLATFORM_SESSION_COOKIE = "hisab_platform_session";
+/**
+ * Signed, short-lived token that carries a successful password check into the 2FA
+ * step. It lives here rather than in `actions.ts` because a `"use server"` module
+ * may only export async functions — a constant exported from it fails at runtime
+ * when a page imports it.
+ */
+export const TOTP_PENDING_COOKIE = "hisab_platform_2fa";
 export const PLATFORM_SESSION_TTL_MS = 8 * 60 * 60 * 1000; // shorter than tenant sessions
 
 export interface PlatformSessionRef {

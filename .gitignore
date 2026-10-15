@@ -7,3 +7,5 @@ node_modules/
 coverage/
 .backups/
 *.enc
+# tenant export bundles (data, never source)
+.exports/

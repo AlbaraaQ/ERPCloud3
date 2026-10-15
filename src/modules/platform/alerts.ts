@@ -70,6 +70,11 @@ export async function raiseAlert(input: RaiseAlertInput): Promise<string> {
 }
 
 /** Resolve every open alert of a kind (used when the condition clears). */
+/**
+ * Close every alert of one kind whose condition has cleared. Acknowledged alerts
+ * are closed too — "acknowledged" means somebody looked at it, not that the
+ * problem went away, and leaving them open forever would hide the next one.
+ */
 export async function resolveAlerts(kind: string, tenantId?: string | null): Promise<number> {
   const rows = await db
     .update(platformAlerts)
@@ -77,7 +82,7 @@ export async function resolveAlerts(kind: string, tenantId?: string | null): Pro
     .where(
       and(
         eq(platformAlerts.kind, kind),
-        eq(platformAlerts.status, "open"),
+        sql`${platformAlerts.status} in ('open','acknowledged')`,
         tenantId === undefined
           ? sql`true`
           : tenantId === null

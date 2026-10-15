@@ -236,11 +236,16 @@ async function captureTableData(
     const res = await rows<{ payload: unknown[] | null; n: number; last_ct: string | null }>(
       exec,
       sql.raw(
+        // The cursor must be the numerically greatest tid — `max(ctid::text)`
+        // orders lexicographically, so '(9,99)' beats '(10,1)' and every later
+        // chunk re-read rows the previous one already captured (silently
+        // duplicating rows until a unique constraint in the restored copy
+        // catches it). tid comparison is numeric; keep it that way.
         `select jsonb_agg(j order by ct) as payload,
                 count(*)::int as n,
-                max(ct) as last_ct
+                max(tid)::text as last_ct
            from (
-             select ${expr} as j, ctid::text as ct
+             select ${expr} as j, ctid::text as ct, ctid as tid
                from public."${table}"
               where ctid > '${cursor}'::tid
               order by ctid
@@ -373,8 +378,22 @@ export function stripIndexName(ddl: string): string {
   );
 }
 
+/**
+ * Point captured DDL at the restore target.
+ *
+ * `pg_get_constraintdef` omits the schema whenever the referenced table is
+ * visible on the capture session's search path, so a captured foreign key reads
+ * `REFERENCES tenants(id)`. Replaying that verbatim binds the copy to the LIVE
+ * public tables: the drill then "passes" while the live database matches the
+ * snapshot and fails the moment it legitimately moves on — i.e. it never tested
+ * the copy at all. Every reference is therefore rewritten to the target schema.
+ */
 function retargetSchema(ddl: string, targetSchema: string): string {
   return ddl
+    .replace(
+      /REFERENCES\s+(?:"public"\.)?"?([A-Za-z_][A-Za-z0-9_]*)"?\s*\(/gi,
+      (_match, table: string) => `REFERENCES "${targetSchema}"."${table}"(`,
+    )
     .replace(/\bpublic\./g, `"${targetSchema}".`)
     .replace(/ALTER TABLE ONLY public\./gi, `ALTER TABLE ONLY "${targetSchema}".`);
 }
@@ -384,6 +403,8 @@ export interface RestoreResult {
   tables: number;
   rows: number;
   durationMs: number;
+  /** Indexes the restore could not recreate — reported, never silently dropped. */
+  skippedIndexes: string[];
 }
 
 /**
@@ -431,24 +452,60 @@ export async function restoreSnapshot(
     }
   }
 
+  // Keys first. A foreign key needs the referenced table's primary/unique key to
+  // exist, and the manifest is ordered by table name (`accounts` comes before
+  // `tenants`), so a single pass fails with 42830 on the first cross-table FK.
+  const deferred: { table: string; name: string; def: string }[] = [];
   for (const table of file.manifest.tables) {
     for (const con of table.constraints) {
       const def = retargetSchema(con.def, target);
+      if (/^\s*FOREIGN\s+KEY/i.test(def) || /^\s*REFERENCES/i.test(def)) {
+        deferred.push({ table: table.name, name: con.name, def });
+        continue;
+      }
       await exec.execute(
         sql.raw(`alter table "${target}"."${table.name}" add constraint "${con.name}" ${def}`),
       );
     }
   }
 
+  // …then foreign keys, retried until no further progress is made (self
+  // references and cycles need their referenced keys before them).
+  let pending = deferred;
+  for (let pass = 0; pass < 5 && pending.length > 0; pass += 1) {
+    const failed: typeof pending = [];
+    let lastError: unknown = null;
+    for (const fk of pending) {
+      try {
+        await exec.execute(sql.raw(`alter table "${target}"."${fk.table}" add constraint "${fk.name}" ${fk.def}`));
+      } catch (e) {
+        failed.push(fk);
+        lastError = e;
+      }
+    }
+    if (failed.length === pending.length) {
+      throw new Error(
+        `restore could not rebuild ${failed.length} foreign key(s), e.g. ${failed[0]!.table}.${failed[0]!.name}: ${
+          lastError instanceof Error ? lastError.message.slice(0, 200) : String(lastError)
+        }`,
+      );
+    }
+    pending = failed;
+  }
+
+  const skippedIndexes: string[] = [];
   for (const table of file.manifest.tables) {
     for (const indexDef of table.indexes) {
       // The index NAME is dropped (`create index on t (...)`) so Postgres derives a
       // fresh one: index names live in the schema namespace, and mangling them to
       // fit 63 bytes silently produced collisions.
       const def = stripIndexName(retargetSchema(indexDef, target));
-      await exec.execute(sql.raw(def)).catch((e: unknown) => {
+      try {
+        await exec.execute(sql.raw(def));
+      } catch (e: unknown) {
+        skippedIndexes.push(`${table.name}: ${indexDef.slice(0, 120)}`);
         logger.warn({ err: e, table: table.name, index: indexDef.slice(0, 80) }, "index restore skipped");
-      });
+      }
     }
   }
 
@@ -457,6 +514,7 @@ export async function restoreSnapshot(
     tables: file.manifest.tables.length,
     rows: rowsRestored,
     durationMs: Date.now() - started,
+    skippedIndexes,
   };
 }
 

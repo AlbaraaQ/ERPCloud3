@@ -60,3 +60,35 @@ Contents: company config, COA, parties, catalog, documents (invoices/receipts/et
 ## 9. Security
 
 Artifacts encrypted at rest (local + Drive), keys in env/secret store; transfer over TLS; no credentials in logs or metadata rows; console actions permission-gated + audited; download URLs signed & expiring.
+
+## 10. Implementation notes — rules that each cost a defect
+
+- **The capture cursor must be a real tid.** `max(ctid::text)` orders lexicographically, so
+  `(9,99)` sorts above `(10,1)`: the chunked capture then re-reads a range on every chunk and
+  silently duplicates rows. The artifact stays internally consistent (its per-chunk hashes
+  cover the duplicates), so only replaying it into a schema with primary keys catches it —
+  use `max(tid)`, never the text form. Verified: 0 duplicates over a 75-table / 8.6k-row
+  capture.
+- **A restore must never reference the live schema.** `pg_get_constraintdef` omits the schema
+  for tables on the capture session's search path, so a captured FK reads
+  `REFERENCES tenants(id)`. Replaying it verbatim binds the drill to the *live* tables: it
+  "passes" while the database matches the snapshot and fails as soon as the database
+  legitimately moves on — i.e. it never tested the copy. Every reference is rewritten to the
+  target schema before replay.
+- **Keys before foreign keys.** The manifest is ordered by table name, so `accounts` (FK →
+  `tenants`) is replayed before `tenants` has its primary key (`42830`). Keys/unique/checks
+  first, then FKs, retried until no further progress.
+- **A skipped index is a finding, not a log line.** Index replay failures are returned as
+  `skippedIndexes`, surfaced as the `indexes` check on the drill, and fail the drill.
+- **Tenant-less rows are only legitimate where the schema says so** — a global feature flag
+  (`scope = 'global'`) or a deletion-register row whose tenant has been purged
+  (`status in ('purged','cancelled')`). Everywhere else a NULL `tenant_id` is a row that lost
+  its tenant, and `tenant_partitioning` reports it.
+- **`session_replication_role = replica` disables RI triggers**, so a purge cannot rely on
+  `on delete set null`; references from surviving rows must be released explicitly. (It also
+  cannot rely on *any* FK action — which is why the purge is catalog-driven rather than
+  hand-written.)
+- **Drills are evidence, not ceremony.** The drill writes its checks, row counts, RTO and
+  schema name onto the run row. Here the copy is an isolated `restore_drill_*` schema inside
+  the same database (the dev engine cannot host a second one); the same code restores into a
+  separate database when one is available.

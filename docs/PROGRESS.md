@@ -8,6 +8,11 @@ exactly as observed.
 
 ### Status: Phase 8 implemented ✅ · AC-030 recorded as environment-limited (pg_dump / off-site) · 4 documented residuals
 
+> **Continuation note:** the workflows were then driven end-to-end by
+> `platform-ops.test.ts`, which found and closed **thirteen** real defects (row-duplicating
+> capture, drill bound to the live tables, silent index loss, an unusable export link, a
+> silently lost deletion certificate, …). See "Continuation (same session)" below.
+
 > **Honesty note:** a backup run is labelled `verified` only after its artifact was re-read
 > and checksum-matched; a check that cannot run is `skipped`, never a pass. The console shows
 > counts, statuses and **declared** plan prices — never a tenant amount. Remote upload in this
@@ -91,6 +96,89 @@ exactly as observed.
    exercised (no browser in the sandbox) — the exports download route was exercised over HTTP.
 4. `/platform` is reachable in the preview but the seeded owner must enrol TOTP before first
    sign-in; tenant-side ZATCA residuals (AC-025, OQ-2/3/4) are unchanged.
+
+### Continuation (same session) — the workflows, and the defects only executing them could find
+
+A new suite (`tests/integration/platform-ops.test.ts`, 10 tests) drives the data-lifecycle
+workflows the earlier suites did not: export bundles and their download link, the whole
+deletion chain, feature flags, the alert inbox, usage metering, rate limits, settings, and the
+honesty of the remote transport label. Writing it exposed **thirteen real defects**, all fixed:
+
+1. **The snapshot duplicated rows.** The chunked capture paginated on `max(ctid::text)`, which
+   compares *lexicographically* — `(9,99)` beat `(10,1)` — so every chunk after the first
+   re-read a range of rows it had already captured. `role_permissions` was captured as 3641
+   rows for 2355 real ones. The artifact was internally consistent (its hashes covered the
+   duplicates), so `verify` passed; only replaying it into a schema with primary keys caught
+   it. Fixed to `max(tid)::text`; a fresh capture of 8598 rows now contains **zero**
+   duplicates.
+2. **The restore tested the wrong copy.** `pg_get_constraintdef` omits the schema when the
+   referenced table is on the capture session's search path, so a captured FK read
+   `REFERENCES tenants(id)` — and the drill replayed it against the **live** `public` tables.
+   It therefore "passed" while the live database matched the snapshot and failed the moment it
+   legitimately moved on. The restore now rewrites every reference to the target schema.
+3. **Keys were added after the foreign keys that need them.** Constraints were replayed in
+   manifest order, so `accounts`' FK to `tenants` ran before `tenants` had a primary key
+   (`42830`). Now: keys/unique/checks first, then FKs, retried until no further progress is
+   made.
+4. **Indexes could vanish silently.** Index replay failures were logged and ignored; they are
+   now returned as `skippedIndexes` and reported as a first-class `indexes` check on the drill
+   (which fails the drill).
+5. **The purge could not run for a tenant that had touched the platform.** The FK-sweep in
+   `deleteTenantRows` wrote `p.tenant_id` against *any* parent without a `tenant_id` column
+   (e.g. `platform_users`), dying on `42703` — and it was willing to sweep platform-wide
+   tables. The sweep is now restricted to tenant-scoped parents and skips `platform_*`/
+   `pgboss*`; the audit chain is never tenant data.
+6. **The deletion certificate was silently lost.** `deletion_requests.tenant_id` was
+   `not null` + `on delete restrict`: the purge deleted its own register row and then updated a
+   row that no longer existed. The register now outlives the tenant (`set null`), the console
+   renders a tenant-less row, and a second purge is refused
+   (`errors.deletionAlreadyPurged`).
+7. **`on delete set null` never fires during a purge.** `session_replication_role = replica`
+   disables RI triggers, so the surviving register kept dangling references and a later restore
+   (rightly) refused to rebuild them. The purge now releases them explicitly; the rows left
+   dangling before the fix were cleaned once.
+8. **Export links never worked.** `buildTenantExport` returned a random token while
+   `downloadTenantExport` verified an HMAC of `id.expiry` (and the stored token hash was never
+   consulted), so every token-based link failed with `errors.permissionDenied`. One token is
+   now minted in the verified form *and* stored hashed, so the link works and stays revocable.
+9. **Usage metering ran against a column that does not exist** (`representatives.status`), so
+   `captureUsageForTenant` threw on every run — the console's usage numbers could never be
+   filled.
+10. **Acknowledged alerts were never resolved** (`resolveAlerts` only closed `open`), so a
+    cleared condition left an open alert forever.
+11. **Flag changes did not name the flag** in the audit payload (only in the entity id), and
+    **settings changes were audited only by the console action** — a script or job could change
+    retention/cooling-off silently. Both now carry their evidence in the module.
+12. **The console dead-ended a stale session.** A revoked/expired cookie (or a disabled
+    account) produced a bare 404; it now redirects to `/platform/login?expired=1`. The
+    enrolment page without a pending token returns to sign-in, and the pending-token cookie
+    name moved out of the `"use server"` module (a `"use server"` file may only export async
+    functions — importing a constant from it fails at runtime).
+
+13. **A purged tenant's export bundle stayed on disk.** The bundle is a full copy of the
+    tenant's data, and the purge removed the database rows but left 21 files in `.exports/`
+    (the dev directory held 30 bundles from test tenants, two of them already purged). The
+    purge now collects the tenant's artifacts (recorded paths + a name sweep as a backstop),
+    deletes them, and records `exportArtifactsRemoved` on the certificate.
+
+**Evidence after the fixes:** `npm test` → **18 files / 144 passed | 8 skipped | 0 failed**;
+`tsc --noEmit` clean; `next build` ok; `backup:run` → `verified` (logical-json, 75 tables /
+8599 rows); `backup:drill` → **passed** in 1.8 s with 8 checks (75 tables / 8599 rows
+restored, 133 FKs rebuilt, 227 policies intact); `/api/health` → `200` fresh.
+
+### Updated residuals
+
+1. `pg_dump --format=custom` path unexecuted here (no client binaries); every run records
+   `format = logical-json`. New: the capture/restore path is now proven on ~8.6k rows in 75
+   tables, but never against a multi-gigabyte database — RTO on such a database is unmeasured.
+2. Remote backup is the `local-contract` transport — no Google Drive credentials, so **no
+   off-site backup claim**.
+3. Console mutations are driven at the module layer in tests; no browser-level form post was
+   exercised (no browser in the sandbox) — rendering, guards and the export download route
+   were exercised over HTTP.
+4. `/platform` is reachable in the preview; the seeded owner (`admin@hisab.sa`) is not yet
+   TOTP-enrolled, so the first sign-in walks through the enrolment flow. Tenant-side ZATCA
+   residuals (AC-025, OQ-2/3/4) are unchanged.
 
 ### Exact next step (Phase 9)
 

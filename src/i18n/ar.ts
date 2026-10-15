@@ -1117,6 +1117,7 @@ export const ar = {
     exportMustBeOffered: "يجب توفير نسخة تصدير قبل أي حذف.",
     coolingOffActive: "لم تنته مهلة الحذف بعد.",
     platformTypedConfirmation: "التأكيد الكتابي يجب أن يطابق اسم المنشأة تماماً.",
+    deletionAlreadyPurged: "طلب الحذف هذا نُفّذ بالفعل — لا يمكن تنفيذ التطهير مرتين.",
 },
   common: {
     save: "حفظ",

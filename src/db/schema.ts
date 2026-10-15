@@ -1960,9 +1960,13 @@ export const deletionRequests = pgTable(
   "deletion_requests",
   {
     id: id(),
-    tenantId: uuid("tenant_id")
-      .notNull()
-      .references(() => tenants.id, { onDelete: "restrict" }),
+    /**
+     * Nullable on purpose: the request is the *register* of a deletion and keeps
+     * the certificate after the tenant is gone (`on delete set null`). Making it
+     * `restrict` would block the purge, and cascading would destroy the very
+     * evidence the workflow exists to produce.
+     */
+    tenantId: uuid("tenant_id").references(() => tenants.id, { onDelete: "set null" }),
     status: deletionStatus("status").notNull().default("requested"),
     reason: text("reason"),
     requestedByLabel: varchar("requested_by_label", { length: 250 }).notNull(),

@@ -83,3 +83,32 @@ alert + optional auto-throttle; incident runbook link.
 Arabic-first like the ERP (same design system), dark/light, keyboard-friendly tables,
 status vocabulary shared with tenant apps (labels, not color-only), dense operational
 layouts with progressive disclosure; destructive actions = typed confirmations.
+
+## 8. Implementation notes
+
+- **Viewing and changing are different rights.** Every screen has a `.view` code as well as
+  its mutation code; `ops` holds every `.view` plus operations, `owner` holds everything.
+  A screen that requires a code the catalog does not define is indistinguishable from a
+  denial — and denies the owner too. A regression test asserts that every code the console
+  requests exists, that `ops` can open every screen it is shown, and that no page imports a
+  value from a `"use client"` module (a function crossing that boundary compiles and 500s).
+- **Scope tenant reads explicitly.** The application connects as a privileged role in this
+  deployment (the database owner bypasses RLS), so a bare `count(*)` inside a tenant
+  transaction reports the whole database. Row-level security is defence in depth, not the
+  only guard: every platform query carries `where tenant_id = …`.
+- **A purge takes the export bundles with it.** A bundle is a complete copy of the tenant's
+  data; deleting the rows while leaving the files would make "deleted" a claim the disk
+  contradicts. The purge removes the tenant's artifacts (recorded paths, plus a sweep of the
+  export directory by tenant prefix as a backstop) and records the count on the certificate.
+- **The deletion register outlives the tenant.** `deletion_requests` keeps the certificate and
+  the audit trail, so its `tenant_id` is nullable (`on delete set null`) and the purge must
+  release its references by hand (`session_replication_role = replica` disables the FK action
+  that would otherwise do it). A second purge of the same request is refused.
+- **The audit chain is never tenant data.** `platform_audit_log` is excluded from tenant
+  purges and from tenant-partitioning comparisons; the append-only trigger refuses
+  `UPDATE`/`DELETE` (`23001`). A re-baseline, if it ever becomes necessary, is itself recorded
+  as an audit event — never done quietly.
+- **A stale session is not a dead end.** A revoked, expired or disabled-account cookie
+  redirects to `/platform/login?expired=1`; enrolment without a pending token returns to
+  sign-in. `"use server"` modules may only export async functions — shared constants live in
+  `session.ts`.

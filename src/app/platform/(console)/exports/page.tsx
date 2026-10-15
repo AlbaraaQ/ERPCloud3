@@ -142,7 +142,7 @@ export default async function ExportsPage() {
         <Table head={[t.tenants, t.statusLabel, t.coolingOffUntil, t.legalHold, t.exportOffered, t.actions]}>
           {deletions.map((d) => (
             <tr key={d.id} className="border-t border-border/60">
-              <td className="px-3 py-2 text-sm">{d.tenantName ?? d.tenantId.slice(0, 8)}</td>
+              <td className="px-3 py-2 text-sm">{d.tenantName ?? (d.tenantId ? d.tenantId.slice(0, 8) : "—")}</td>
               <td className="px-3 py-2">
                 <Badge tone={statusTone(d.status)}>{d.status}</Badge>
               </td>

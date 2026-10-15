@@ -219,7 +219,18 @@ export async function runInvariants(
     }
   }
 
-  /* --------------------------------------------------- 3. tenant partitioning */
+  /**
+ * A NULL tenant_id is only legitimate where the row is global or terminal by the
+ * table's own rules — a global feature flag, or a deletion-request row whose tenant
+ * has already been purged (the register outlives the tenant because it carries the
+ * certificate). Anywhere else a NULL means the row lost its tenant.
+ */
+const NULL_TENANT_ALLOWED: Record<string, string> = {
+  feature_flags: "scope = 'global'",
+  deletion_requests: "status in ('purged','cancelled')",
+};
+
+/* --------------------------------------------------- 3. tenant partitioning */
   {
     const problems: string[] = [];
     let scoped = 0;
@@ -228,11 +239,20 @@ export async function runInvariants(
       if (!columns.some((c) => TABLES_WITH_TENANT.test(c))) continue;
       if (isPlatformScoped(table.name)) continue;
       scoped += 1;
+      const rule = NULL_TENANT_ALLOWED[table.name];
       const nulls = await rows<{ n: number }>(
         exec,
-        sql.raw(`select count(*)::int as n from "${target}"."${table.name}" where tenant_id is null`),
+        sql.raw(
+          `select count(*)::int as n from "${target}"."${table.name}" where tenant_id is null${
+            rule ? ` and not (${rule})` : ""
+          }`,
+        ),
       );
-      if (Number(nulls[0]?.n ?? 0) > 0) problems.push(`${table.name}: ${nulls[0]!.n} rows without tenant_id`);
+      if (Number(nulls[0]?.n ?? 0) > 0) {
+        problems.push(
+          `${table.name}: ${nulls[0]!.n} row(s) without tenant_id${rule ? ` (and not ${rule})` : ""}`,
+        );
+      }
     }
 
     // Per-tenant counts must match the capture's own manifest (not the live

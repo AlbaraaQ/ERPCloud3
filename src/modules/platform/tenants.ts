@@ -428,7 +428,15 @@ export async function setFlag(input: {
     entity: "feature_flag",
     entityId: `${input.tenantId ?? "global"}:${key}`,
     before: existing ? { enabled: existing.enabled } : null,
-    after: { enabled: input.enabled, note: input.note ?? null },
+    // the payload names the flag and its scope: an auditor reading the chain must
+    // not have to decode `<tenant|global>:<key>` out of the entity id
+    after: {
+      key,
+      scope: input.tenantId ? "tenant" : "global",
+      tenantId: input.tenantId,
+      enabled: input.enabled,
+      note: input.note ?? null,
+    },
     alsoAuditTenantId: input.tenantId,
   });
 }

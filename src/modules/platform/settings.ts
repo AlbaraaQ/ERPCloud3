@@ -4,11 +4,13 @@
  * Everything the console must be able to change without a deploy: backup
  * directory, retention policy, Drive folder, staleness threshold, deletion
  * cooling-off window. Defaults are code-side so a fresh database behaves
- * sensibly, and every write is audited by the caller.
+ * sensibly, and every write lands in the append-only platform audit chain — the
+ * audit is written by `saveSettings` itself, not by the caller.
  */
 
 import { eq } from "drizzle-orm";
 import { db } from "@/db";
+import { writePlatformAudit } from "./audit";
 import { platformSettings } from "@/db/schema";
 import type { DbExecutor } from "@/modules/shared/db-context";
 
@@ -69,9 +71,16 @@ export async function getSettings(exec: DbExecutor = db): Promise<PlatformSettin
   };
 }
 
+/**
+ * Persist platform settings. Auditing lives HERE, not in the console action: these
+ * values decide backup retention, the support-grant ceiling and the deletion
+ * cooling-off window, so a change made by a script or a job must leave the same
+ * trace as one made from the console.
+ */
 export async function saveSettings(
   patch: Partial<PlatformSettings>,
   updatedByLabel: string,
+  actorPlatformUserId?: string | null,
 ): Promise<PlatformSettings> {
   const current = await getSettings();
   const next: PlatformSettings = {
@@ -86,5 +95,14 @@ export async function saveSettings(
       target: platformSettings.key,
       set: { value: next, updatedAt: new Date(), updatedByLabel },
     });
+  await writePlatformAudit(db, {
+    actorPlatformUserId: actorPlatformUserId ?? null,
+    actorLabel: updatedByLabel,
+    action: "platform.settings_saved",
+    entity: "settings",
+    entityId: SETTINGS_KEY,
+    before: current as unknown as Record<string, unknown>,
+    after: next as unknown as Record<string, unknown>,
+  });
   return next;
 }

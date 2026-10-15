@@ -9,7 +9,8 @@
 
 import type { ReactNode } from "react";
 import Link from "next/link";
-import { notFound } from "next/navigation";
+import { cookies } from "next/headers";
+import { notFound, redirect } from "next/navigation";
 import {
   Activity,
   Building2,
@@ -23,6 +24,7 @@ import {
   UserCog,
 } from "lucide-react";
 import { getPlatformContext } from "@/modules/platform/context";
+import { PLATFORM_SESSION_COOKIE } from "@/modules/platform/session";
 import { platformLogoutAction } from "@/modules/platform/actions";
 import { countOpenAlerts } from "@/modules/platform/alerts";
 import { getLocale, getDict } from "@/i18n";
@@ -32,7 +34,15 @@ export const metadata = { title: "Hisab Platform" };
 
 export default async function PlatformLayout({ children }: { children: ReactNode }) {
   const ctx = await getPlatformContext();
-  if (!ctx) notFound();
+  if (!ctx) {
+    // No cookie at all: the middleware already sends visitors to the login page,
+    // so reaching here means someone deep-linked — 404 (the console is not
+    // advertised). A cookie that no longer works (revoked, expired, or an account
+    // that was disabled) is a different case: it must not dead-end the operator.
+    const stale = (await cookies()).get(PLATFORM_SESSION_COOKIE)?.value;
+    if (stale) redirect("/platform/login?expired=1");
+    notFound();
+  }
 
   const locale = await getLocale();
   const t = getDict(locale);

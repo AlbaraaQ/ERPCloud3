@@ -1120,6 +1120,7 @@ export const en: Dict = {
     exportMustBeOffered: "An export must be offered before any deletion.",
     coolingOffActive: "The cooling-off window has not ended yet.",
     platformTypedConfirmation: "The typed confirmation must match the tenant name exactly.",
+    deletionAlreadyPurged: "This deletion request was already purged — a purge cannot run twice.",
 },
   common: {
     save: "Save",

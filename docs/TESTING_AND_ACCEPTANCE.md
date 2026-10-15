@@ -153,47 +153,90 @@ used by AC-019/031 and report tests so formulas are proven against messy real da
 ### 3.3 Phase 8 — platform administration & backups (AC-030, AC-033, AC-037, AC-038)
 
 **Executed evidence** (`platform-admin.test.ts` 13 tests, `platform-backup.test.ts` 6 tests,
-`npm test` 17 files / 134 passed / 8 skipped / 0 failed; console smoke over HTTP):
+`platform-ops.test.ts` 10 tests; `npm test` **18 files / 144 passed / 8 skipped / 0 failed**;
+`tsc` clean; `next build` ok; console smoke over HTTP):
 
-1. **Backup → verify → restore drill (AC-030).** `platform-backup.test.ts` runs the real
-   path: capture inside one `repeatable read, read only` transaction, encrypt (AES-256-GCM),
-   write the artifact, re-read it, decrypt, checksum-match the plaintext, then `verify`
-   records `verified` **only** after the artifact was re-read and matched — a run whose
-   artifact changed afterwards is `failed`, never silently `verified`. The drill restores
-   into an isolated `restore_drill_*` schema, re-checks 7 invariants (including
-   `referential_integrity` over 133 FKs and `isolation` over 227 RLS policies), compares
-   per-tenant row counts against the values the capture itself claims, and drops the schema.
-   A deliberately sabotaged copy (one business row moved to the other tenant, artifact
-   re-hashed so the file is self-consistent) still fails `tenant_partitioning`, with the
-   detail naming the tenant and both counts.
-2. **Suspension preserves history (AC-033).** The drill and the admin suite assert that a
-   suspended tenant keeps every row, that writes are refused at the transaction level
-   (`25006`, read-only transaction + `app.read_only` RLS), and that nothing is deleted:
-   status changes only. Deletion exists solely as an explicit workflow
-   (request → export offer → typed confirmation → cooling-off → legal hold → purge) and
-   `purgeTenant` is the only code path that removes rows.
-3. **Platform cannot read tenant books (AC-033/AC-038).** Every platform data-layer query
-   in the suite is checked to select identity/status/count columns only; the console renders
-   counts, statuses, MRR **declared** in the plan price and backup figures. Reading tenant
-   content (or building an export bundle) requires an approved, unexpired, screen-scoped
-   support grant, and every use is written to both chains. Impersonation does not exist.
-4. **Every console mutation is audited (AC-037).** The suite performs the console mutations
-   (tenant create/status/plan, flag set, alert acknowledge, grant request/approve/revoke,
-   export build, backup verify/prune, retention policy) and asserts each action appears in
-   `platform_audit_log`, that the chain re-verifies, and that the append-only trigger
-   refuses `UPDATE`/`DELETE` (`23001`).
-5. **Console isolation & reachability (AC-038).** Over HTTP: `/platform*` without a session
-   → `307 /platform/login`; `/platform/login` → `200`; a tenant user's cookie grants
-   nothing. With a platform session, all nine console routes return `200`
-   (`/platform`, `/tenants`, `/tenants/[id]`, `/plans`, `/flags`, `/backups`, `/alerts`,
-   `/audit`, `/exports`) and `/api/platform/export/[id]` returns `401` without a session
-   and `400 errors.notFound` for an unknown id.
+1. **Backup → verify → restore drill (AC-030).** The capture runs inside one
+   `repeatable read, read only` transaction, is encrypted (AES-256-GCM), re-read, decrypted
+   and checksum-matched, so a run is recorded `verified` **only** after its artifact was
+   shown to reproduce — and `failed` if it changes afterwards. The drill restores into an
+   isolated `restore_drill_*` schema and reports **8 checks** against the copy: `indexes`
+   (every captured index recreated — a restore that silently loses indexes is reported, not
+   logged), `row_counts`, `journal_balance`, `tenant_partitioning` (per-tenant counts
+   compared with the capture's own manifest), `row_sampling`, `audit_integrity`,
+   `referential_integrity` (133 FKs rebuilt inside the copy) and `isolation` (227 policies),
+   then drops the schema. Latest run: **75 tables / 8599 rows restored, 133 FKs rebuilt,
+   RTO ≈ 1.8 s**. A deliberately sabotaged copy (one business row moved to another tenant,
+   artifact re-hashed so the file stays self-consistent) still fails `tenant_partitioning`,
+   with the tenant and both counts named.
+2. **Suspension preserves history (AC-033).** A non-active tenant keeps every row; writes are
+   refused inside the transaction (`25006` → `errors.tenantReadOnly`); reads still work.
+   Deletion exists only as an explicit workflow, and `platform-ops.test.ts` walks every gate:
+   wrong typed confirmation → `errors.platformTypedConfirmation`; purge before an export was
+   offered → `errors.exportMustBeOffered`; legal hold → `errors.legalHoldActive`;
+   cooling-off still running → `errors.coolingOffActive`; after cooling-off the purge removes
+   the tenant **and every child row**, leaves a certificate with the deleted-row counts and a
+   safety-backup id on a register row that survives the tenant, and writes `tenant.purged`
+   to the platform chain. Verified afterwards with an independent connection: 0 tenants,
+   0 users, 0 customers, 0 journals, 0 exports for that id.
+3. **Platform cannot read tenant books (AC-033/AC-038).** Platform queries select
+   identity/status/count columns only; the console renders counts, statuses, MRR **declared**
+   in the plan price, and backup figures. Forming an export bundle or reading tenant content
+   as a platform actor requires an approved, unexpired, screen-scoped support grant — asserted
+   both ways (`platform.grant.required`, and `platform.grant.amounts` when a grant was issued
+   without monetary scope). Impersonation does not exist.
+4. **Every console mutation is audited (AC-037).** Tenant create/status/plan, flag change,
+   alert acknowledge, grant request/approve/revoke, export build/download, settings change,
+   backup verify/prune all appear in `platform_audit_log`; the chain re-verifies
+   (`verify_platform_audit_chain`), and the append-only trigger refuses `UPDATE`/`DELETE`
+   (`23001`) even from the owner connection.
+5. **Console isolation & reachability (AC-038).** Over HTTP: `/platform*` without a session →
+   `307 /platform/login`; a stale/disabled session cookie → `307
+   /platform/login?expired=1` (never a dead-end 404); `/platform/login` → `200`;
+   `/platform/login/enroll` without a pending token → back to login. With a platform session
+   all nine routes return `200` (`/platform`, `/tenants`, `/tenants/[id]`, `/plans`, `/flags`,
+   `/backups`, `/alerts`, `/audit`, `/exports`); `/api/platform/export/[id]` returns `401`
+   unauthenticated and `400 errors.notFound` for an unknown id.
+6. **Data lifecycle (exports, flags, alerts, metering, limits).** A bundle carries a manifest
+   (per-table row counts + sha256) and is served only through an expiring signed link whose
+   hash is stored (so the link is revocable); an expired link is refused **and** the row is
+   marked `expired`. Global flags apply immediately and a tenant override wins; both are in
+   the chain with the flag name. Alerts move raise → acknowledge (operator recorded) →
+   resolve. `usage_metrics` is captured per tenant/month and per day. `platform-login-ip`
+   allows 20 hits in the window and refuses the 21st. The remote transport reports itself as
+   `local-contract`, `offsite: false` — never as off-site storage.
+
+**Defects this gate found (all fixed, each with a regression test).** The suite exists
+because the console and the workflows *looked* finished while being verifiably broken:
+console pages requested permission codes that do not exist (`platform.plans.view`,
+`flag.view`, `backups.view`, `alerts.view`, `exports.view`) so **every** page 500'd for an
+`ops` session; server pages imported values from `"use client"` modules
+(`Functions cannot be passed directly to Client Components`) and passed a render function as
+a prop; the dashboard filtered subscriptions on `('trial','active')` while the enum value is
+`trialing`; the snapshot cursor used `max(ctid::text)` (lexicographic, so `(9,99)` beat
+`(10,1)`) and **duplicated rows** — `role_permissions` captured 3641 rows for 2355 real ones;
+the restore replayed foreign keys unqualified (bounding the drill to the *live* tables) and
+added them before the referenced keys existed (`42830`); `captureUsageForTenant` selected
+`representatives.status`, which does not exist, so the usage capture failed on every run;
+`deleteTenantRows` wrote `p.tenant_id` against parents that have no such column (the purge
+died as soon as a tenant had touched the platform) and could sweep platform-wide tables; the
+purge deleted its own register row and then updated it, **losing the deletion certificate**
+silently; because `session_replication_role = replica` disables RI triggers, `on delete set
+null` never fired and the register kept dangling references; the export link returned a token
+minted in one format while the download verified another (every token link 403'd); and
+`resolveAlerts` never closed acknowledged alerts.
 
 **Recorded limits.** The `pg_dump --format=custom` path cannot execute here (no
-`pg_dump`/`pg_restore`/`psql` on `PATH`, no `/usr/lib/postgresql`): every run in this
-sandbox records `format = logical-json`, and the runner picks the custom path wherever the
-binary exists. Remote upload runs the explicit `local-contract` transport — it is **not**
-Google Drive and is not presented as off-site storage.
+`pg_dump`/`pg_restore`/`psql` on `PATH`, no `/usr/lib/postgresql`): every run in this sandbox
+records `format = logical-json`, and the runner picks the custom path wherever the binary
+exists. Remote upload runs the explicit `local-contract` transport — it is **not** Google
+Drive and is not presented as off-site storage. The dev database is reached as the
+`postgres` superuser (`rolbypassrls`), so row-level security is **not** the enforcement
+mechanism under test; `tenancy.rls.test.ts` keeps its own non-privileged role, and the
+platform data layer therefore scopes every query explicitly rather than relying on policies.
+The dev engine (PGlite behind a wire proxy) serves all logical connections from one backend
+session, so role-switching and savepoint assertions are **skipped** there with a documented
+reason, and never reported as passing.
 
 ## 4. Security & concurrency suites
 
