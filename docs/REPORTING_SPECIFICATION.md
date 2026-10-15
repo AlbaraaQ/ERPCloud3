@@ -9,7 +9,12 @@ Every report below states: **sources**, **formula**, **filters**, **draft policy
 - Date semantics: filters apply to `business_date` (tenant TZ, D-016) unless "as of instant" is stated.
 - Drafts are **excluded** by default; a visible "include drafts" toggle (where offered) labels output accordingly.
 - Reversals: reversal entries are first-class rows; P&L-style reports naturally net them; document lists show both with a "عكسي/Reversed" badge. Voided-before-post docs appear only in audit-style listings.
-- Exports: PDF (Arabic-correct rendering) + XLSX; export events audited; drill-down links only where the viewer has document-level permission.
+- Exports: **CSV and XLSX are implemented** (`/reports/export`, same dispatcher as the
+  screen, `reports.export` enforced, `reports.exported` audited); the XLSX sheet is RTL and
+  keeps money numeric. **PDF remains open** — Arabic-correct rendering needs a
+  shaping/font-subsetting renderer that the dependency set does not provide (residual in
+  PROGRESS Session 9). Drill-down links appear only where the viewer has document-level
+  permission.
 - **Subledger documents are read from the postings, never guessed (Phase 7, binding).** The
   AR/AP document set is exactly the set of `journal_entries.source_id` whose **posted lines
   touched the resolved control account** (`postingMappings` key → account, code only as a

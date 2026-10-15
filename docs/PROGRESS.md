@@ -74,9 +74,12 @@ exactly as observed.
    with the reason; the UI shows the reason and no numbers. They need either data that
    this build does not capture (statement import, rejected override attempts, commission
    rules) or Phase-8 cost closure.
-2. **PDF/XLSX export** is not implemented: CSV is exported (audited, same query path).
-   Arabic-correct PDF needs an embedded-font renderer; XLSX needs a workbook writer —
-   neither is in the dependency set, so this is recorded rather than half-built.
+2. **PDF export** is not implemented. CSV + **XLSX** are (`?format=xlsx`; the sheet is
+   RTL, numbers stay numeric, Arabic is written as inline strings, and the same dispatcher
+   feeds it — `src/modules/reports/xlsx.ts`, dependency-free ZIP+OOXML, verified by
+   `tests/unit/xlsx.test.ts` and read back with an independent ZIP parser). Arabic-correct
+   PDF needs a shaping + font-subsetting renderer, which is not in the dependency set, so
+   it is recorded rather than half-built.
 3. **Filters**: date range, `asOf`, account, warehouse, dimension and slow-days are wired;
    branch/cost-center/project filters on the journal-based reports are not yet exposed in
    the UI even though `journal_lines` carries those columns.
@@ -93,8 +96,12 @@ exactly as observed.
 ```
 npx tsc --noEmit                                        ✓ clean
 npx vitest run tests/integration/reports.test.ts        ✓ 12/12
-next build                                              ✓ /reports + /reports/export compiled
-node scripts/db-reset.mjs && npm test                   ← recorded in the summary below
+npx vitest run tests/unit/xlsx.test.ts                  ✓ 6/6   (ZIP read back independently)
+node scripts/db-reset.mjs && npm test                   ✓ 15 files, 115 passed | 8 skipped
+next build                                              ✓ /reports + /reports/export, exit 0
+curl /reports/{R-02,R-03,R-04,R-05,R-08,R-12,R-20,R-42,R-62,R-66}  ✓ 200
+curl /reports/export?report=R-60[&format=xlsx]          ✓ 200 (CSV + valid XLSX)
+npx tsx scripts/reports-check.mts owner@horizon.test    ✓ RL-1/2/4/5 OK, RL-3 names its cause
 ```
 
 ---

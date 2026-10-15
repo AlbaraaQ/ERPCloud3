@@ -302,6 +302,7 @@ export const en: Dict = {
     includeZero: "Include zero accounts",
     apply: "Apply",
     export: "Export CSV",
+    exportXlsx: "Export Excel",
     empty: "No data matches the selected filters.",
     pending: "Not available yet",
     needsFinancialPermission: "This report requires the financial-statements permission.",

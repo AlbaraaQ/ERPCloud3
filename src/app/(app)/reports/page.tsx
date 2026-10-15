@@ -254,13 +254,22 @@ export default async function ReportsPage({ searchParams }: { searchParams: Sear
               {page.apply}
             </button>
             {canExport && (
-              <Link
-                className="btn-ghost btn"
-                href={`/reports/export?${new URLSearchParams({ ...(params as Record<string, string>), report: definition.code } as Record<string, string>).toString()}`}
-              >
-                <Download className="h-4 w-4" aria-hidden />
-                {page.export}
-              </Link>
+              <>
+                <Link
+                  className="btn-ghost btn"
+                  href={`/reports/export?${new URLSearchParams({ ...(params as Record<string, string>), report: definition.code } as Record<string, string>).toString()}`}
+                >
+                  <Download className="h-4 w-4" aria-hidden />
+                  {page.export}
+                </Link>
+                <Link
+                  className="btn-ghost btn"
+                  href={`/reports/export?${new URLSearchParams({ ...(params as Record<string, string>), report: definition.code, format: "xlsx" } as Record<string, string>).toString()}`}
+                >
+                  <Download className="h-4 w-4" aria-hidden />
+                  {page.exportXlsx}
+                </Link>
+              </>
             )}
           </form>
 

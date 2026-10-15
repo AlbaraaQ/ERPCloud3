@@ -300,6 +300,7 @@ export const ar = {
     includeZero: "إظهار الحسابات الصفرية",
     apply: "تطبيق",
     export: "تصدير CSV",
+    exportXlsx: "تصدير Excel",
     empty: "لا توجد بيانات مطابقة للمحددات.",
     pending: "غير متاح بعد",
     needsFinancialPermission: "هذا التقرير يتطلب صلاحية عرض القوائم المالية.",

@@ -1,5 +1,5 @@
 /**
- * CSV export for any report (spec §0: export events are audited).
+ * CSV / XLSX export for any report (spec §0: export events are audited).
  *
  * The export runs the SAME dispatcher as the screen, so a downloaded file can never
  * disagree with what the viewer saw. Drill-down data is not included — only the rows
@@ -15,6 +15,7 @@ import { getLocale, getDict } from "@/i18n";
 import { todayBusinessDate } from "@/modules/shared/dates";
 import { sql } from "drizzle-orm";
 import { REPORT_CATALOG, runReport, type ReportParams, type ReportResult } from "@/modules/reports";
+import { buildXlsx, type XlsxInput } from "@/modules/reports/xlsx";
 
 export const dynamic = "force-dynamic";
 
@@ -36,6 +37,17 @@ function toCsv(result: ReportResult, titles: string[]): string {
   if (result.totals) lines.push(result.totals.map(csvCell).join(","));
   // Excel needs the BOM to read Arabic correctly
   return `\uFEFF${lines.join("\r\n")}\r\n`;
+}
+
+/** Same rows as the CSV, but as a real spreadsheet: numbers stay numeric, sheet is RTL. */
+function toXlsx(result: ReportResult, titles: string[], sheetName: string): Buffer {
+  const input: XlsxInput = {
+    sheetName,
+    header: titles,
+    rows: result.rows.map((row) => row.cells.map((cell) => cell)),
+    totals: result.totals ? result.totals.map((cell) => cell) : null,
+  };
+  return buildXlsx(input);
 }
 
 export async function GET(request: Request): Promise<Response> {
@@ -68,8 +80,14 @@ export async function GET(request: Request): Promise<Response> {
 
   const locale = await getLocale();
   const rep = getDict(locale).rep as unknown as Record<string, string>;
-  const titles = (columns: ReportResult["columns"]) =>
+  const labelsFor = (columns: ReportResult["columns"]) =>
     columns.map((c) => rep[c.titleKey.split(".").slice(1).join(".")] ?? c.titleKey);
+
+  const format = url.searchParams.get("format") === "xlsx" ? "xlsx" : "csv";
+  const contentTypes = {
+    csv: "text/csv; charset=utf-8",
+    xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  } as const;
 
   const payload = await withTenant(ctx.tenant.id, async (trx) => {
     if (!requestedFrom) {
@@ -79,6 +97,7 @@ export async function GET(request: Request): Promise<Response> {
       params.from = rows.rows[0]?.first_day ?? `${today.slice(0, 7)}-01`;
     }
     const result = await runReport(trx, ctx.tenant!.id, code, params);
+    const labels = labelsFor(result.columns);
     await writeAudit(trx, {
       tenantId: ctx.tenant!.id,
       actorUserId: ctx.userId,
@@ -86,15 +105,18 @@ export async function GET(request: Request): Promise<Response> {
       action: "reports.exported",
       entity: "report",
       entityId: code,
-      after: { format: "csv", params, rows: result.rows.length },
+      after: { format, params, rows: result.rows.length },
     });
-    return toCsv(result, titles(result.columns));
+    return format === "xlsx"
+      ? toXlsx(result, labels, `${code} ${labels[0] ?? ""}`.trim())
+      : toCsv(result, labels);
   });
 
-  const filename = `${code}-${params.from ?? ""}-${params.to ?? ""}.csv`;
-  return new Response(payload, {
+  const filename = `${code}-${params.from ?? ""}-${params.to ?? ""}.${format}`;
+  const body = typeof payload === "string" ? payload : new Uint8Array(payload);
+  return new Response(body, {
     headers: {
-      "content-type": "text/csv; charset=utf-8",
+      "content-type": contentTypes[format],
       "content-disposition": `attachment; filename="${filename}"`,
     },
   });
