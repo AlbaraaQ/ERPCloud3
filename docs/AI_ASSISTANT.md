@@ -85,3 +85,28 @@ provider/model, ticket ids. Tests (Phase 9): tool permission matrix (rep can't c
 income_statement_summary; cross-tenant params ignored/overridden server-side), injection
 can't escalate (seeded malicious text in customer notes → no tool abuse), no-SRB: model
 cannot call unregistered tools, approval flow executes via services with audit.
+
+## 8. Implementation status (Phase 9 — built; residuals listed)
+
+**Built and tested** (`tests/unit/ai-assistant.test.ts` 12 + `tests/integration/ai-assistant.test.ts` 14;
+see PROGRESS Session 11 for the evidence and the five defects the suites found):
+
+| Piece | Where | Notes |
+|---|---|---|
+| Provider adapters | `modules/ai/providers/{openai,anthropic,index,types}.ts` | plain `fetch`, injectable `fetchImpl`, 60 s abort, key by env-var **name**, no vendor SDK in the core |
+| Availability | `modules/ai/config.ts` | platform flag `ai_assistant` (default ON when no row) → tenant switch (OFF by default) → read-only tenant → provider → model → key; each refusal is an i18n key |
+| Read tools (10) | `modules/ai/tools.ts` | `sales_today`, `collections_today`, `price_anomalies` = `sales.invoice.view`; `overdue_receivables` = `reports.view`; `unsettled_reps` = `settlement.review`; `low_stock`, `expiry_soon`, `stock_variance_explain` = `inventory.view`; `income_statement_summary`, `expense_anomalies` = `reports.financial.view`. No tool takes a tenant argument. |
+| Action tool | `chat.ts` (`propose_action`) | the only non-read tool; files a ticket, never executes. The intent name is validated against the registry, so an invented intent is a refusal **with an escalation flag**. |
+| Tickets | `modules/ai/tickets.ts`, intents in `modules/ai/intents.ts` | `journal_entry_draft` → `accounting.journal.create` (draft only) and `tenant_export` → `reports.export`; 24 h TTL; `proposed → approved → executed | rejected | expired`; approving without the permission changes nothing |
+| Guardrails | `modules/ai/guardrails.ts` | 14 EN/AR patterns (flagged, not blocked), delimiters with neutralized breakouts, sanitized/capped answers, capped tool payloads |
+| UI | `/assistant`, `/assistant/settings` | chat + tool chips + ticket cards; settings behind `settings.company.manage`, key entered as an env-var name |
+| Audit | `ai_conversations`, `ai_messages`, `ai_tool_calls`, `ai_injection_flags`, `ai_approval_tickets` | refusals, escalations, injection hits and ticket ids are all recorded; the transcript keeps tool *names*, not payloads |
+
+**Limits in this environment (do not read more into the green tests than this):** no provider is
+called — every turn runs against an injected scripted provider, and the dev tenant's key is a
+placeholder; the model's *answers* are therefore never judged for quality here, only the
+boundaries around them. Not implemented yet: retention purge job (`retentionDays` is stored and
+displayed only), streaming, document/attachment ingestion, per-tenant provider-terms text,
+token metering into `usage_metrics`. Answers are plain text (no markdown renderer), `MAX_ROUNDS`
+= 3 and `MAX_TOOL_CALLS_PER_TURN` = 6 are hard caps, and asking is open to any tenant user —
+the tool permissions and the ticket permission are the boundaries, not a separate `ai.use` code.

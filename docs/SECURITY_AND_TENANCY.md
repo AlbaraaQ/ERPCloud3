@@ -56,6 +56,13 @@ exports, backup/restore ops, device registration/revocation, break-glass grants,
 calls. Tamper-evidence: hash-chained audit rows (each row references previous row hash
 per tenant) — verification job reports breaks.
 
+AI assistant specifics (implemented, AI_ASSISTANT §8): tool calls are recorded with their
+arguments, outcome, row count, denial reason and an escalation flag; refusals and injection
+attempts are audited rather than dropped; the model is given no write tool at all (mutations
+are approval tickets executed by a human with the intent's permission); **no tool accepts a
+tenant identifier**, so nothing the model produces can point at another tenant; free-text
+business memos are withheld under `metrics_only` (prose cannot be masked the way a name can).
+
 ## 8. Platform support access (break-glass)
 
 No default access to tenant financial data (D-020). Exceptional support access requires

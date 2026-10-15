@@ -1669,6 +1669,182 @@ export const deletionStatus = pgEnum("deletion_status", [
   "cancelled",
 ]);
 
+/* ------------------------------------------------------- phase 9 — assistant */
+
+export const aiDataScope = pgEnum("ai_data_scope", ["metrics_only", "names_allowed"]);
+export const aiRole = pgEnum("ai_message_role", ["system", "user", "assistant", "tool"]);
+export const aiTicketStatus = pgEnum("ai_ticket_status", [
+  "proposed",
+  "approved",
+  "rejected",
+  "executed",
+  "expired",
+]);
+
+
+/* --------------------------------------------------------- phase 9 — assistant */
+
+/**
+ * Per-tenant assistant configuration (AI_ASSISTANT §1). Disabled by default: the
+ * assistant is opt-in, and `enabled` is the tenant-level half of the kill switch
+ * (the platform half is the `ai_assistant` feature flag).
+ *
+ * The provider key is NEVER stored here — only the NAME of the environment
+ * variable that holds it (`secretRef`), so a database dump cannot leak a key.
+ */
+export const aiTenantConfig = pgTable("ai_tenant_config", {
+  tenantId: uuid("tenant_id")
+    .primaryKey()
+    .references(() => tenants.id, { onDelete: "cascade" }),
+  enabled: boolean("enabled").notNull().default(false),
+  provider: varchar("provider", { length: 40 }).notNull().default("openai"),
+  model: varchar("model", { length: 120 }).notNull().default(""),
+  baseUrl: varchar("base_url", { length: 300 }),
+  secretRef: varchar("secret_ref", { length: 120 }),
+  /** Aggregates + masked labels, or names where the question needs them (§5). */
+  dataScope: aiDataScope("data_scope").notNull().default("metrics_only"),
+  /** Conversation retention in days; tool-call audit outlives the transcripts. */
+  retentionDays: integer("retention_days").notNull().default(30),
+  updatedByLabel: varchar("updated_by_label", { length: 250 }),
+  updatedAt: updatedAt(),
+});
+
+/** A chat thread. Messages cascade with it; retention deletes whole threads. */
+export const aiConversations = pgTable(
+  "ai_conversations",
+  {
+    id: id(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    title: varchar("title", { length: 200 }),
+    locale: varchar("locale", { length: 5 }).notNull().default("ar"),
+    messageCount: integer("message_count").notNull().default(0),
+    lastMessageAt: timestamp("last_message_at", { withTimezone: true, mode: "date" }),
+    createdAt: createdAt(),
+  },
+  (t) => [index("ai_conversations_tenant_idx").on(t.tenantId, t.lastMessageAt)],
+);
+
+/**
+ * Transcript rows. Tool *payloads* are not stored here: a tool result may carry
+ * customer names and amounts, and the audit trail is required to outlive the
+ * conversation (AI_ASSISTANT §7) — so the transcript keeps the answer text and
+ * the tool NAME, while `ai_tool_calls` keeps the validated arguments and outcome.
+ */
+export const aiMessages = pgTable(
+  "ai_messages",
+  {
+    id: id(),
+    conversationId: uuid("conversation_id")
+      .notNull()
+      .references(() => aiConversations.id, { onDelete: "cascade" }),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    role: aiRole("role").notNull(),
+    content: text("content").notNull().default(""),
+    toolName: varchar("tool_name", { length: 80 }),
+    model: varchar("model", { length: 120 }),
+    tokensIn: integer("tokens_in"),
+    tokensOut: integer("tokens_out"),
+    latencyMs: integer("latency_ms"),
+    at: timestamp("at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
+  },
+  (t) => [index("ai_messages_conversation_idx").on(t.conversationId, t.at)],
+);
+
+/** One row per tool invocation: what was asked, what happened, how much came back. */
+export const aiToolCalls = pgTable(
+  "ai_tool_calls",
+  {
+    id: id(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    conversationId: uuid("conversation_id").references(() => aiConversations.id, {
+      onDelete: "set null",
+    }),
+    userId: uuid("user_id").references(() => users.id, { onDelete: "set null" }),
+    toolName: varchar("tool_name", { length: 80 }).notNull(),
+    args: jsonb("args").$type<Record<string, unknown>>(),
+    ok: boolean("ok").notNull().default(true),
+    /** refusal reason: unknown tool, missing permission, tenant not enabled, … */
+    deniedReason: varchar("denied_reason", { length: 200 }),
+    rowsReturned: integer("rows_returned"),
+    /** true when the model asked for something it may not have — a security signal */
+    escalationAttempt: boolean("escalation_attempt").notNull().default(false),
+    latencyMs: integer("latency_ms"),
+    at: timestamp("at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
+  },
+  (t) => [index("ai_tool_calls_tenant_idx").on(t.tenantId, t.at), index("ai_tool_calls_tool_idx").on(t.toolName)],
+);
+
+/**
+ * Injection-pattern log (AI_ASSISTANT §6): suspicious instructions found in text
+ * that came from business data or the user are recorded and flagged, never
+ * silently obeyed — and never silently dropped either.
+ */
+export const aiInjectionFlags = pgTable(
+  "ai_injection_flags",
+  {
+    id: id(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    conversationId: uuid("conversation_id").references(() => aiConversations.id, {
+      onDelete: "set null",
+    }),
+    userId: uuid("user_id").references(() => users.id, { onDelete: "set null" }),
+    source: varchar("source", { length: 40 }).notNull(), // user_input | tool_output
+    pattern: varchar("pattern", { length: 80 }).notNull(),
+    excerpt: varchar("excerpt", { length: 300 }),
+    at: timestamp("at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
+  },
+  (t) => [index("ai_injection_flags_tenant_idx").on(t.tenantId, t.at)],
+);
+
+/**
+ * Approval tickets (AI_ASSISTANT §4): the assistant may *prepare* work, and only a
+ * human with the ordinary permission can approve it — execution then runs through
+ * the normal services, so it is the human's action, not the model's.
+ */
+export const aiApprovalTickets = pgTable(
+  "ai_approval_tickets",
+  {
+    id: id(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    conversationId: uuid("conversation_id").references(() => aiConversations.id, {
+      onDelete: "set null",
+    }),
+    /** what the ticket proposes: a registered intent key, never free text */
+    intent: varchar("intent", { length: 80 }).notNull(),
+    payload: jsonb("payload").$type<Record<string, unknown>>(),
+    summary: text("summary"),
+    /** permission a human needs to approve + execute it */
+    requiredPermission: varchar("required_permission", { length: 80 }).notNull(),
+    status: aiTicketStatus("status").notNull().default("proposed"),
+    proposedByUserId: uuid("proposed_by_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    expiresAt: timestamp("expires_at", { withTimezone: true, mode: "date" }).notNull(),
+    decidedByUserId: uuid("decided_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    decidedAt: timestamp("decided_at", { withTimezone: true, mode: "date" }),
+    decisionNote: text("decision_note"),
+    executedAt: timestamp("executed_at", { withTimezone: true, mode: "date" }),
+    executedByUserId: uuid("executed_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    /** what the service layer returned (document id/number), never model output */
+    result: jsonb("result").$type<Record<string, unknown>>(),
+    createdAt: createdAt(),
+  },
+  (t) => [index("ai_tickets_tenant_status_idx").on(t.tenantId, t.status, t.createdAt)],
+);
+
 /** Entitlements live in one JSONB document per plan (feature keys + numeric quotas). */
 export interface PlanEntitlements {
   features?: string[];
@@ -2105,4 +2281,14 @@ export const schema = {
   retentionClass,
   exportStatus,
   deletionStatus,
+  // phase 9 — assistant
+  aiTenantConfig,
+  aiConversations,
+  aiMessages,
+  aiToolCalls,
+  aiInjectionFlags,
+  aiApprovalTickets,
+  aiDataScope,
+  aiRole,
+  aiTicketStatus,
 };

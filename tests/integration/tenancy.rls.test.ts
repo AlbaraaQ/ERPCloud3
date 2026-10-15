@@ -42,7 +42,13 @@ describe.skipIf(!DB)("RLS tenant isolation (db layer)", () => {
        end if; end $$;`,
     );
     await q(admin, `create role ${TEST_ROLE} login password '${TEST_PW}'`);
-    await q(admin, `grant connect on database app_db to ${TEST_ROLE}`);
+    // the database name is whatever the server actually calls it (a managed
+    // server, a restored copy and the PGlite socket server differ), so it is read
+    // from the connection instead of being hard-coded
+    const { rows: dbRows } = await q(admin, `select current_database() as name`);
+    const dbName = String(dbRows[0]?.name ?? "").replace(/"/g, "");
+    expect(dbName, "current_database() must be readable").toBeTruthy();
+    await q(admin, `grant connect on database "${dbName}" to ${TEST_ROLE}`);
     await q(admin, `grant usage on schema public to ${TEST_ROLE}`);
     await q(admin, `grant select, insert, update, delete on all tables in schema public to ${TEST_ROLE}`);
     await q(admin, `grant execute on function public.app_tenant_id() to ${TEST_ROLE}`);

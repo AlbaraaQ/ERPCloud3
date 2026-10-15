@@ -5,7 +5,7 @@ not verified working and tested. Every phase ends with: tests executed, docs upd
 `docs/PROGRESS.md` appended, and the full validation gate
 (`next typegen` → `tsc --noEmit` → `next build` → platform `build_and_start`) passing.
 
-**Current pointer:** Phases 0–7 ✅ complete (AC-025 environment-limited) · **Phase 8 implemented** — `/platform` console (tenants, plans/entitlements, flags, quotas, alerts, audit, exports), verified backups + restore drills, support grants, deletion workflow; residuals listed in `PROGRESS.md` Session 10 → **Phase 9 (AI assistant) next**.
+**Current pointer:** Phases 0–8 ✅ complete (AC-025 environment-limited; Phase 8 residuals in `PROGRESS.md` Session 10) · **Phase 9 implemented** — `/assistant` chat over a permission-gated read-only tool registry, approval tickets executed by a human through the normal services, injection guardrails, full conversation/tool audit; residuals in `PROGRESS.md` Session 11 → **Phase 10 (UX completion, hardening & release readiness) next**.
 
 ---
 
@@ -115,13 +115,25 @@ platform admin cannot read tenant financial data by default ✅ (test: platform 
 identity/status/counts; reading content needs an approved grant) · console isolated from tenant
 sessions ✅ (HTTP smoke + tests).
 
-## Phase 9 — AI assistant
+## Phase 9 — AI assistant ✅ (implemented 2026-10-16; evidence + residuals in PROGRESS.md Session 11)
 
 **Depends on:** Phase 7 (authoritative queries exist).
 
-Provider adapters + per-tenant enablement; permission-aware read-only tool registry (sales_today, overdue_receivables, unsettled_reps, low_stock, expiry_soon, income_statement_summary, anomaly scan); approval-ticket flow for any action; prompt-injection guardrails; full conversation/tool audit; privacy data-minimization table implemented.
+Provider adapters (OpenAI- and Anthropic-compatible over `fetch`, key by env-var name) + per-tenant
+enablement and a platform kill switch; permission-aware read-only tool registry (10 tools, figures
+reused from the Phase 7 report services, no tool accepts a tenant argument); approval-ticket flow for
+prepared actions (`journal_entry_draft`, `tenant_export`) executed by a human with the intent's
+permission through the normal services; prompt-injection guardrails (flagged, contained, never obeyed);
+full conversation/tool/refusal/injection audit; privacy data-minimization (`metrics_only` masks labels
+and withholds free-text memos) implemented.
 
-**Exit:** tools cannot cross tenant or permission boundaries (tests); model cannot mutate state without human approval (test); provider config isolated from core.
+**Exit:** tools cannot cross tenant or permission boundaries ✅ (14 integration tests: matrix, refusal
+recording, cross-tenant args rejected as invalid); the model cannot mutate state without human approval ✅
+(ticket state machine + `errors.permissionDenied` for a non-holder + executed-only-once); provider config
+isolated from the core ✅ (adapters behind one interface, no vendor SDK, scripted provider in tests).
+
+**Not done here (Phase 10):** retention purge job, streaming answers, document ingestion, provider-terms
+text, token metering.
 
 ## Phase 10 — UX completion, hardening & release readiness
 

@@ -4,6 +4,129 @@
 append-only per session, **newest first**; keep them factual — commands and results
 exactly as observed.
 
+## Session 11 — 2026-10-16 · Phase 9 (AI assistant) implemented — chat, permission-gated tools, approval tickets, audit
+
+### Status: Phase 9 implemented ✅ · 5 defects found and fixed · 6 documented residuals · Phase 10 (UX completion & release readiness) next
+
+> **Honesty notes.** (1) **No provider is called in this environment.** Every test drives the
+> assistant with an injected scripted provider; the dev tenant is switched on with a
+> *placeholder* env var, so a real message from the preview ends with the honest
+> "المساعد غير متاح" answer rather than a fabricated one. Nothing here claims a live
+> OpenAI/Anthropic exchange. (2) The assistant has **no write path**: the single action tool
+> files an approval ticket, and execution happens in `decideTicket` under the *approver's*
+> identity and permission, through the normal services. (3) Figures come from the Phase 7
+> report services — the assistant never re-implements a number, and `price_anomalies` refuses
+> (`tool_unavailable`) because R-24 is not implemented in this build.
+
+### Work completed
+
+- **Schema (applied to the dev DB with `drizzle-kit push`):** `ai_tenant_config`
+  (enabled OFF by default, provider/model/`baseUrl`/`secretRef`/dataScope/retentionDays),
+  `ai_conversations`, `ai_messages` (answer text + tool *name*, never tool payloads),
+  `ai_tool_calls` (validated args, ok, denial reason, rows, escalation flag, latency),
+  `ai_injection_flags` (source: `user_input|tool_output`), `ai_approval_tickets`
+  (intent/payload/summary/required permission/expiry/decision/execution) + enums
+  `ai_data_scope|ai_role|ai_ticket_status`.
+- **Providers** (`modules/ai/providers/*`): OpenAI-compatible (`/chat/completions`) and
+  Anthropic-compatible (`/v1/messages`) adapters over plain `fetch` (no vendor SDK), key read
+  from `process.env[secretRef]` **by name**, 60 s abort timeout, injectable `fetchImpl`.
+  Round-trip fidelity fix: assistant turns now carry their `tool_calls`/`tool_use` blocks, so
+  the tool results that follow are a legal conversation for both APIs.
+- **Availability** (`aiAvailability`, `config.ts`): platform flag (`ai_assistant`, default ON
+  when no row) → tenant switch (default OFF) → **read-only tenant** → supported provider →
+  model → key present. Every refusal is an i18n key, never a stack trace and never an empty
+  answer. Availability includes the read-only check because the assistant has no mode that
+  answers without writing its audit rows.
+- **Tool registry** (`tools.ts`, 10 read tools) — permission-gated, zod-validated, tenant id
+  is never an argument, row caps, masked labels under `metrics_only`, honest `unavailable`
+  for R-24. Mapping: `sales_today`/`collections_today`/`price_anomalies` → `sales.invoice.view`;
+  `overdue_receivables` → `reports.view`; `unsettled_reps` → `settlement.review`;
+  `low_stock`/`expiry_soon`/`stock_variance_explain` → `inventory.view`;
+  `income_statement_summary`/`expense_anomalies` → `reports.financial.view`.
+- **Chat orchestration** (`chat.ts`): max 3 provider rounds and 6 tool calls per turn; every
+  round, refusal, injection hit and proposal is recorded; conversation ids that are not the
+  caller's own are ignored (and logged), never resolved into someone else's thread.
+- **Intents & tickets** (`intents.ts`, `tickets.ts`): `journal_entry_draft`
+  (`accounting.journal.create` → `createDraftManual`, stays **draft**) and `tenant_export`
+  (`reports.export` → `buildTenantExport`). State machine `proposed → approved → executed |
+  rejected | expired`, 24 h TTL, payload re-validated at execution, both the decision and the
+  execution written to the tenant audit chain, `errors.permissionDenied` (and *nothing*
+  changed) for an approver without the intent's permission.
+- **Guardrails** (`guardrails.ts`): 14 EN+AR injection patterns (flag, never silently block),
+  `wrapUntrusted` delimiters with **neutralized breakout sequences**, `buildSystemPrompt`
+  (data-only rule, no-mutation rule, cite-tools rule, masking rule), `sanitizeAnswer`
+  (script/handler stripping, 4 000 char cap), `renderToolData` (hard cap).
+- **UI:** `/assistant` (chat, per-answer tool chips, ticket cards with approve/reject),
+  `/assistant/settings` (`settings.company.manage`; the key is entered as an **env var name**,
+  never a secret), nav entry behind the tenant switch. i18n: 22 `errors.ai*` keys + a new `ai`
+  section in **both** dictionaries, enforced by a coverage test that scans the module.
+
+### Commands executed → results
+
+| Command | Result |
+|---------|--------|
+| `npm run typecheck` | ✓ clean after every step |
+| `npx vitest run tests/unit/ai-assistant.test.ts` | ✓ 12 tests (guardrails, registry boundaries, i18n coverage) |
+| `npx vitest run tests/integration/ai-assistant.test.ts` | ✓ 14 tests (permission matrix, cross-tenant args, injection, tickets, audit) |
+| `npm test` (full gate) | ✓ **20 files / 170 passed / 8 skipped / 0 failed** (~22 s) |
+| `npx next build` | ✓ "Compiled successfully in 14.0 s"; `/assistant` and `/assistant/settings` compiled |
+| `npm run backup:run` | ✓ verified run `01a141fd-009a-73fe-80af-018a948951e5` — 81 tables / 1 558 rows, artifact 1 281 387 B, plaintext sha256 `0ffacb80…`, remote `local-contract` verified |
+| `npm run backup:drill` | ✓ passed — 81 tables / 1 558 rows restored into `restore_drill_mva73xtv`: 51 posted entries balanced, 68 tenant-owned tables partitioned, 15/15 sampled rows, 201 audit rows hashed, 149 FKs satisfied, 227 policies present, **RTO ≈ 1.3 s** |
+| HTTP smoke (live session cookie) | ✓ `/assistant` 200 (chat box, tool chips, ticket card, approve/reject), `/assistant/settings` 200, `/dashboard` 200, `/api/health` 200; sidebar link `/assistant` present |
+
+### Defects found by the Phase 9 suites (all fixed, all re-verified)
+
+1. **Kill-switch bypass by any other global flag.** `aiGloballyEnabled` built its predicate as
+   one raw string: `key = 'ai_assistant' and tenant_id = $1 or tenant_id is null` — SQL reads
+   that as `(key = … and tenant_id = …) or tenant_id is null`, so **every** global flag row
+   became a candidate and the first one decided the answer. With `ai_assistant` switched off,
+   the assistant still served the tenant because an unrelated `test_flag_*` row was enabled.
+   Fixed with explicit `and(eq(key), or(eq(tenant), isNull(tenant)))`; proven by re-running
+   the kill-switch test with those rows present.
+2. **`renderToolData` exceeded its own cap** (6 003 chars for a 6 000 contract — the appended
+   `…"}` was not subtracted). Fixed; the unit test now asserts the cap exactly.
+3. **`wrapUntrusted` did not neutralize its own close marker inside content.** A memo
+   containing `<<<END_UNTRUSTED_DATA>>> …` closed the untrusted block early and let the rest
+   read as system text — the exact breakout the delimiters exist to prevent. Now
+   `<<<`/`>>>` become `‹‹‹`/`›››`, with an `isWrapped()` assertion in the tests.
+4. **Provider round trip dropped the assistant's tool-call blocks**, so the `tool`/`tool_result`
+   messages that follow had no `tool_calls`/`tool_use` to answer — invalid conversations for
+   both APIs on the second round. Fixed in both adapters (`ChatMessage.toolCalls`).
+5. **`tenancy.rls.test.ts` hard-coded `grant connect on database app_db`** and failed wherever
+   the database is named differently (the sandbox PGlite instance). Now reads
+   `current_database()`.
+
+Design corrections made while driving the tests: the propose-tool `intent` is validated as a
+*free string against the registry* (an enum in the schema made the "unknown intent" security
+signal unreachable), and `stock_variance_explain` now returns `recentMovements` with memos
+**only** under `names_allowed` — which also gave the tool-output injection case a real source
+instead of a synthetic one.
+
+### Residuals moved forward (explicitly not done)
+
+1. **No live provider exchange anywhere**: adapters are exercised through a scripted provider;
+   `ASSISTANT_API_KEY` in `.env` is a documented placeholder, so the preview shows the honest
+   unavailable answer when a message is actually sent.
+2. **Retention is configured, not enforced**: `retentionDays` is stored and shown, but no job
+   purges old threads yet (tool-call audit and injection flags already outlive the transcript
+   by design — proven by test).
+3. No streaming answers, no document/attachment ingestion (§6 treats such content as data-only
+   *when* it exists), no per-tenant provider-terms text in the settings screen (§5).
+4. Token usage is not metered into `usage_metrics` yet.
+5. Asking is open to any tenant user (each tool is permission-checked, and tickets still need
+   the intent's permission to execute); a dedicated `ai.use` permission is not introduced.
+6. `test_flag_*` rows left by older suites are not swept — they are legitimate global flags,
+   but the incident above is a reminder that flag *keys* must never be matched loosely.
+
+### Exact next step (Phase 10 — UX completion, hardening & release readiness)
+
+1. RTL/bilingual + accessibility + status-semantics audit across the new `/assistant` screens.
+2. Implement the retention purge job (Phase 9 residual 2) and metering (residual 4).
+3. Re-run the acceptance list of TESTING_AND_ACCEPTANCE.md end-to-end; re-drill the restore.
+4. Deployment/rollback + operational runbooks; release-readiness report with evidence.
+
+---
+
 ## Session 10 — 2026-10-16 · Phase 8 (platform administration & backups) implemented, console reachable end-to-end
 
 ### Status: Phase 8 implemented ✅ · AC-030 recorded as environment-limited (pg_dump / off-site) · 4 documented residuals

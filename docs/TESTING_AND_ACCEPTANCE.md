@@ -33,6 +33,11 @@ integration → `next build`. E2E before releases. Coverage target ≥ 80% lines
   leak across connections there and role switching is a no-op, so the idempotent-replay,
   concurrency and RLS suites report **skipped** on that engine and run for real against
   a normal PostgreSQL server.
+- For the same reason test **files** run one at a time (`vitest.config.ts` →
+  `fileParallelism: false`): with one backend session behind every connection, two files
+  running in parallel share transaction state, so a statement issued by one can be executed
+  inside the other's open transaction. On a normal PostgreSQL server file parallelism is
+  safe again and the flag can be lifted.
 
 ## 3. Acceptance scenarios (AC-ID → requirement refs)
 
@@ -237,6 +242,62 @@ platform data layer therefore scopes every query explicitly rather than relying 
 The dev engine (PGlite behind a wire proxy) serves all logical connections from one backend
 session, so role-switching and savepoint assertions are **skipped** there with a documented
 reason, and never reported as passing.
+
+### 3.4 Phase 9 — AI assistant (FR-090…, D-019)
+
+**Executed evidence** (`tests/unit/ai-assistant.test.ts` 12 tests,
+`tests/integration/ai-assistant.test.ts` 14 tests; full gate `npm test` **20 files / 170 passed /
+8 skipped / 0 failed**; `tsc` clean; `next build` ok; `/assistant` + `/assistant/settings` 200 over
+HTTP with a live tenant session):
+
+1. **Permission matrix, twice.** A session that may only use van-sales permission is *offered*
+   exactly `propose_action`; every read it asks for is refused
+   (`missing_permission:reports.financial.view`, `missing_permission:sales.invoice.view`), and an
+   owner session is offered all 11 tools. Every refusal is written to `ai_tool_calls` with
+   `escalation_attempt = true` — a model probing for data it may not read is a signal the audit
+   trail is *supposed* to surface, not an exception to swallow.
+2. **No unregistered tool, no invented intent.** `execute_sql` → `unknown_tool`;
+   `propose_action` with `delete_all_invoices` → `unknown_intent` + escalation, no ticket. The
+   registry (not the JSON schema) is the boundary, so the security signal is reachable.
+3. **Tenant scope is not an argument.** No tool accepts `tenantId`/`tenant_id` (asserted against
+   every tool's derived JSON schema); a call carrying another tenant's id is rejected as
+   `invalid_arguments`, stored verbatim for the audit, and nothing of the other tenant is returned.
+4. **Injection cannot escalate.** Hostile text from the *user* and from *business data* (a
+   `stock_ledger` memo containing an instruction attempt **and** a delimiter breakout) is recorded
+   in `ai_injection_flags` with its source, contained inside `<<<UNTRUSTED_DATA … >>>` with the
+   breakout neutralized (`isWrapped()` asserted on exactly what the provider received), and no tool
+   ran outside the permitted set. Under `metrics_only` the memo is *withheld* rather than clipped.
+5. **Approval executes as a human, not as the model.** A proposal creates a ticket
+   (`proposed`, 24 h TTL, payload re-validated at execution) and creates **no** journal entry. A
+   caller without `accounting.journal.create` gets `errors.permissionDenied` and the ticket is
+   untouched (not even the decision note). The owner's approval writes `ai.ticket.approved`,
+   executes `createDraftManual` (entry status `draft`, `source_type manual`), writes
+   `ai.ticket.executed.journal_draft`, and stores the entry id on the ticket; a second approval is
+   refused with `errors.aiTicketDecided`. The export intent produces a bundle file on disk with the
+   requesting user recorded.
+6. **Availability is honest and total.** Not opted in → `errors.aiDisabledTenant`; platform flag off
+   → `errors.aiDisabledPlatform` (outranking the tenant's switch); suspended tenant →
+   `errors.aiTenantReadOnly`; a pasted key, a 400-day retention and an unknown provider are refused
+   at configuration time. In every refusal case **nothing is written**: no conversation, no message.
+7. **Audit outlives the transcript.** Deleting a conversation cascades its messages but leaves
+   `ai_tool_calls`/flags behind (`conversation_id` set null), which is what the retention promise
+   requires.
+
+**Environment limits (AC-025 §2 style):** no provider is called — turns run against an injected
+scripted provider, so answer *quality* is not judged here at all; the provider wire formats are
+covered by the adapters' shape and by the round-trip fix (assistant turns carry their tool-call
+blocks). Retention is stored but no purge job exists yet, so the retention test asserts the *survival*
+of the audit, not a purge run.
+
+**Defects found and fixed while driving these suites** (details in PROGRESS Session 11):
+
+| # | Defect | Effect if shipped |
+|---|--------|-------------------|
+| 1 | `aiGloballyEnabled` matched `key = … and tenant_id = … or tenant_id is null` (SQL precedence) | **any** other global feature flag silently overrode the assistant kill switch |
+| 2 | `renderToolData` appended `…"}` after slicing to the cap | payloads 3 chars over the documented limit |
+| 3 | `wrapUntrusted` did not neutralize its own close marker inside content | a memo could close the untrusted block early and read as system text |
+| 4 | both provider adapters dropped assistant tool-call blocks | second round was an invalid conversation for OpenAI/Anthropic |
+| 5 | `tenancy.rls.test.ts` hard-coded `database app_db` | suite failed on any server whose database is named otherwise |
 
 ## 4. Security & concurrency suites
 

@@ -27,6 +27,7 @@ import {
   MonitorSmartphone,
   LogOut,
   ChevronDown,
+  Sparkles,
   type LucideIcon,
 } from "lucide-react";
 
@@ -40,6 +41,8 @@ export interface ShellProps {
   permissions: string[];
   unreadNotifications: number;
   locale: string;
+  /** the assistant is off unless the tenant turned it on and the platform allows it */
+  assistantEnabled: boolean;
 }
 
 interface NavItem {
@@ -48,6 +51,8 @@ interface NavItem {
   label: (t: Dict) => string;
   perm?: string;
   enabled: boolean;
+  /** only shown when the tenant has the assistant enabled (§6 kill switch) */
+  requiresAssistant?: boolean;
 }
 
 const NAV_SECTIONS: { label: (t: Dict) => string; items: NavItem[] }[] = [
@@ -73,6 +78,7 @@ const NAV_SECTIONS: { label: (t: Dict) => string; items: NavItem[] }[] = [
     label: (t) => t.nav.sectionAdmin,
     items: [
       { href: "/reports", icon: BarChart3, label: (t) => t.nav.reports, perm: "reports.view", enabled: true },
+      { href: "/assistant", icon: Sparkles, label: (t) => t.nav.assistant, enabled: true, requiresAssistant: true },
       { href: "/settlement", icon: Scale, label: (t) => t.rep.rqTitle, perm: "settlement.review", enabled: true },
       { href: "/tax", icon: Receipt, label: (t) => t.nav.tax, perm: "tax.view", enabled: false },
       { href: "/hr", icon: Users, label: (t) => t.nav.hr, perm: "hr.employees.manage", enabled: false },
@@ -107,6 +113,7 @@ export function AppShell({
   tenantStatus,
   permissions,
   unreadNotifications,
+  assistantEnabled,
 }: ShellProps) {
   const pathname = usePathname();
   const has = (perm?: string) => !perm || permissions.includes(perm);
@@ -134,7 +141,9 @@ export function AppShell({
 
         <nav className="flex-1 space-y-6 overflow-y-auto px-3 py-5">
           {NAV_SECTIONS.map((section, si) => {
-            const visible = section.items.filter((i) => has(i.perm));
+            const visible = section.items.filter(
+              (i) => has(i.perm) && (!i.requiresAssistant || assistantEnabled),
+            );
             if (visible.length === 0) return null;
             return (
               <div key={si}>
