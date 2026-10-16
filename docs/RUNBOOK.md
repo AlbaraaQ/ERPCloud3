@@ -46,9 +46,10 @@ npm run build                          # production build
 npm run backup:run && npm run backup:verify     # expect: status verified
 npm run backup:drill                            # expect: status passed (isolated schema, dropped after)
 
-# 2) schema (only if the release changed src/db/schema.ts)
-npx drizzle-kit push                            # review the generated SQL before confirming
-psql "$DATABASE_URL" -f src/db/rls.sql          # idempotent: re-applies tenant policies
+# 2) environment + schema (only if the release changed src/db/schema.ts)
+npm run env:check                               # refuses to continue on a missing/odd key or URL
+npm run db:migrate                              # schema push, then the RLS policies (227 of them)
+#    `npm run db:seed` is for a NEW deployment only: it resets the demo users' passwords
 
 # 3) application
 npm start &                                     # or restart the supervisor/unit
@@ -63,9 +64,10 @@ npm run acceptance:sweep -- --soak=20           # expect: ACCEPTANCE SWEEP PASSE
 | Gate | Expected | If it fails |
 |---|---|---|
 | `/api/health` | `status: ok` | see §5 |
+| login transport | `npm run login:probe` → `LOGIN PROBE PASSED — 15/15` (tenant form **and** the console's enrollment → TOTP → session path) | the public origin is not allow-listed for Server Actions (`HISAB_ALLOWED_ORIGINS` / `next.config.ts`); every form will 500 in the browser while localhost looks fine |
 | `backupFreshness` | not `stale` (window 4 h by default) | `npm run backup:run` |
 | `acceptance:sweep` | 39/39 (routes + namespace isolation + soak) | the failing route names itself in the output |
-| `npm test` | 20 files / 0 failed (authoritative run is on the pre-deploy commit) | do not deploy |
+| `npm test` | 23 test files / 0 failed (authoritative run is on the pre-deploy commit) | do not deploy |
 
 **Deployment window.** Backups and the retention sweep are the only scheduled writers; the
 maintenance job runs daily at 01:15. A restore (`platform.backup.restore`) is a maintenance-window
@@ -192,9 +194,12 @@ defect, not as an incident.
 ## 7. Quick reference
 
 ```bash
+# setup (new machine, or after a sandbox reboot)
+npm run env:setup && npm run env:check && npm run db:migrate && npm run db:seed
+
 # gates
 npm run typecheck && set -a && . ./.env && set +a && npm test && npm run build
-npm run acceptance:sweep -- --soak=20
+npm run login:probe && npm run acceptance:sweep -- --soak=20
 
 # data safety
 npm run backup:run   && npm run backup:verify && npm run backup:drill

@@ -80,8 +80,18 @@ async function revokePlatformGrantedPermissions() {
 async function ensurePlatformOwner() {
   const email = (process.env.SEED_PLATFORM_EMAIL ?? "admin@hisab.sa").toLowerCase();
   const found = await db.execute(sql`select * from public.platform_login_lookup(${email})`);
-  const rows = (found as unknown as { rows: unknown[] }).rows;
-  if (rows.length > 0) return { email, created: false };
+  const rows = (found as unknown as { rows: unknown[] }).rows as { platform_user_id: string }[];
+  if (rows.length > 0) {
+    // Same rule as the demo users: `db:seed` is the sandbox bootstrap, and an operator who runs
+    // it must be able to sign in with the password the seed just printed. Without this, a
+    // password that was created while `.env` held a truncated value (a `#` in the password, see
+    // `npm run env:check`) stayed wrong forever and the console was unreachable.
+    await db
+      .update(platformUsers)
+      .set({ passwordHash: await hashPassword(BOOTSTRAP_PASSWORD) })
+      .where(eq(platformUsers.id, rows[0]!.platform_user_id));
+    return { email, created: false, passwordRefreshed: true };
+  }
   await db.insert(platformUsers).values({
     email,
     passwordHash: await hashPassword(BOOTSTRAP_PASSWORD),
@@ -96,7 +106,7 @@ async function ensurePlatformOwner() {
     entity: "platform_user",
     entityId: email,
   });
-  return { email, created: true };
+  return { email, created: true, passwordRefreshed: false };
 }
 
 interface TenantSeed {
@@ -162,6 +172,15 @@ async function ensureTenant(seed: TenantSeed) {
     let userId: string;
     if (existing) {
       userId = existing.id;
+      // `db:seed` is advertised as idempotent, and a printed sign-in line that no longer
+      // works is worse than no line at all: the password in the environment (which may have
+      // changed since the row was created — or have been truncated by a `#` in .env) is
+      // re-applied here, so "run seed again" always restores a working demo login.
+      await db
+        .update(users)
+        .set({ passwordHash: await hashPassword(DEMO_PASSWORD) })
+        .where(eq(users.id, userId));
+      created.push(`${email} (password refreshed)`);
     } else {
       const [createdUser] = await db.insert(users).values({
         tenantId: tenant.id,
@@ -424,7 +443,11 @@ async function main() {
 
   console.log("— seed: platform owner");
   const platform = await ensurePlatformOwner();
-  console.log(`   ${platform.email} ${platform.created ? "(created)" : "(exists)"}`);
+  console.log(
+    `   ${platform.email} ${
+      platform.created ? "(created)" : platform.passwordRefreshed ? "(exists — password refreshed)" : "(exists)"
+    }`,
+  );
 
   console.log("— seed: tenant A (الأفق)");
   const a = await ensureTenant({

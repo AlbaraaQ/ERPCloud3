@@ -250,6 +250,13 @@ try {
 }
 
 const failed = checks.filter((c) => !c.ok);
+if (failed.length > 0 && checks.some((c) => c.detail.includes("ECONNREFUSED"))) {
+  console.error(
+    "\nnote: the dev server stopped answering mid-run (this sandbox reaps long-lived dev\n" +
+      "      processes under sustained load). Restart it and re-run; the route checks that\n" +
+      "      printed before the failures already passed.",
+  );
+}
 console.log(
   `\n${failed.length === 0 ? "ACCEPTANCE SWEEP PASSED" : "ACCEPTANCE SWEEP FAILED"} — ${checks.length - failed.length}/${checks.length} checks`,
 );

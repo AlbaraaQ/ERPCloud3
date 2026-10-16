@@ -21,7 +21,8 @@ to ZATCA, or any multi-tenant hosting of real customer books.
 | Gate | Command | Result |
 |---|---|---|
 | Types | `npm run typecheck` | ✅ exit 0, 0 errors |
-| Test suite | `set -a && . ./.env && set +a && npm test` | ✅ **22 files / 192 passed / 8 skipped / 0 failed** |
+| Test suite | `set -a && . ./.env && set +a && npm test` | ✅ **23 files / 202 passed / 8 skipped / 0 failed** |
+| Login transport (both surfaces) | `npm run login:probe` | ✅ **LOGIN PROBE PASSED — 15/15** (tenant login from a proxied origin → 303 + session → `/dashboard`; console: login → enrollment → TOTP code → `/platform` 200; foreign origin refused) |
 | Production build | `npm run build` | ✅ "Compiled successfully in 13.2s", all routes emitted |
 | End-to-end HTTP sweep | `npm run acceptance:sweep -- --soak=20` | ✅ **ACCEPTANCE SWEEP PASSED — 39/39 checks** |
 | Backup + verification | `npm run backup:run && npm run backup:verify` | ✅ `status verified`, 6/6 checks |
@@ -110,7 +111,10 @@ here (no client binaries), so `backup_runs.format = logical-json`; remote transp
 | 2 | Screen props were declared in two interfaces (label bag **and** component props) | `assistant-screen.tsx` | de-duplicated: the label bag owns wording, the component owns data |
 | 3 | A read-only tenant would have been reported as "0 conversations expired" by the retention sweep | `modules/ai/retention.ts` | now skipped *before* the sweep with `skippedReason: errors.tenantReadOnly` |
 | 4 | The first acceptance sweep script failed itself: it minted a tenant session without `sessions.tenant_id` (every screen 307'd), and its error detector matched Next's embedded 404-template text inside the RSC payload | `scripts/acceptance-sweep.mts` | both fixed; the sweep now passes 39/39 and a failed request is reported as a check, never thrown |
-| 5 | (environmental, not a defect) one sweep run stalled for minutes on a single route and the dev server was reaped mid-run | dev engine under sustained sequential load | re-run clean; soak numbers are reported as smoke only |
+| 5 | (environmental, not a defect) one sweep run stalled for minutes on a single route and the dev server was reaped mid-run | dev engine under sustained sequential load | re-run clean; soak numbers are reported as smoke only; the sweep now prints a note when the server disappears mid-run instead of 20 bare soak failures |
+| 6b | **Login returned HTTP 500 in the preview** with `Invalid Server Actions request.` — the proxy makes `Origin` (the public preview host) differ from `host`/`x-forwarded-host` (the upstream), and Next.js refuses a Server Action unless the public origin is allow-listed. Every form in the app was affected; `localhost` looked fine | `next.config.ts` (new `experimental.serverActions.allowedOrigins`, overridable with `HISAB_ALLOWED_ORIGINS`) | fixed and locked by `npm run login:probe` (15 checks, runs the real RSC client encoding from the preview origin, and asserts a **foreign** origin is still refused) |
+| 6c | `SEED_DEMO_PASSWORD=Hisab#2026` in `.env` was **truncated to `Hisab`** by the dotenv parser (`#` starts a comment). The seed therefore hashed `Hisab` while the operator typed `Hisab#2026`: **every demo login failed**, and `db:seed` never repaired it because existing users were left untouched. The platform owner had the same problem | `scripts/seed.ts`, `.env.example`, `scripts/env-check.mts` | seed now re-applies the environment password for existing demo users *and* the platform owner (so the printed sign-in line is true); `env:setup` writes the value quoted; `env:check` refuses a bare `#`; guarded by `tests/unit/setup-workflow.test.ts` (runs the real scripts and parses the result) |
+| 6d | The console login action returns `redirectTo: "/platform/login/enroll"` for an operator who is not TOTP-enrolled, but the form **ignored that field** — a fresh installation could not reach enrollment, so the console was unenterable | `src/app/platform/login/login-form.tsx` | form now navigates on `redirectTo` and also renders a link (keyboard/no-JS path); the probe walks the whole flow and ends with `/platform` 200 |
 | 6 | The operations guide instructed `cp .env.example .env`, but **`.env.example` did not exist** — the very first onboarding step an operator would run was impossible | `docs/OPERATIONS_GUIDE.md` vs repository root | template written (documented, secret-free, `.gitignore` negated for it) **and** locked by `tests/unit/env-example.test.ts` (8 assertions: every variable read by `src/`/`scripts/` is declared, every variable in the guide's table is declared, no secret is filled in, live-restore stays off by default). Mutation-verified twice: removing `PG_POOL_MAX` and filling `HISAB_ENCRYPTION_KEY` each failed the suite. The template then performed the rebuild it documents (§8). |
 
 No defect was closed by weakening a test or by loosening a validator.
@@ -137,10 +141,29 @@ one, which turned the incident into the strongest possible test of the onboardin
 | environment | `cp .env.example .env`, then filled `HISAB_ENCRYPTION_KEY` with the guide's own generator command plus the two seed passwords and the assistant placeholder | 9 active variables, no secret invented |
 | database engine | `node scripts/dev-postgres.mjs --dir .pglite` | PostgreSQL 18.6 (PGlite) on 127.0.0.1:5432 |
 | schema + policies + seed | `node scripts/db-reset.mjs` | 52 permission codes, platform owner created, both demo tenants seeded (new ids: tenant A `01a1422b-a19c-…`) |
-| gates | `npm run typecheck` · `npm test` | clean · **22 files / 192 passed / 8 skipped / 0 failed** |
+| gates | `npm run typecheck` · `npm test` | clean · **23 files / 202 passed / 8 skipped / 0 failed** |
 | acceptance | `npm run acceptance:sweep -- --soak=20` | **39/39 checks passed**, soak mean 192 ms / p95 406 ms |
 | data safety | `npm run backup:run` · `verify` · `drill` | artifact sha `fbfbb66cd0da63d7…`, 81 tables / 1518 rows, verify 6/6, drill 7/7 invariants, RTO ≈ 1.7 s |
 
 Everything above ran against the database created by the template's own instructions, with a key
 generated by the command printed inside it. The guide is therefore not a description of a working
 system — it is the procedure that produced one, executed end to end.
+
+### 8.1 Setup workflow, verified as a workflow
+
+Following the same rule as §8 (the guide is the procedure, so the procedure gets executed), the
+environment work was refactored into named commands and tested:
+
+```bash
+npm run env:setup     # .env from the template, 32-byte key generated, passwords written QUOTED
+npm run env:check     # fails early, bilingually, on an empty/odd key or a bare '#' value
+npm run db:migrate    # schema push + src/db/rls.sql (227 policies) — non-destructive
+npm run db:seed       # permission catalog, platform owner, two demo tenants (safe to re-run)
+npm run login:probe   # 15 checks: both login surfaces end to end, from a proxied origin
+```
+
+`tests/unit/setup-workflow.test.ts` (5 tests) executes `env:setup` and `env:check` in a temporary
+directory and asserts the resulting environment: the key decodes to 32 bytes, the file is mode
+0600, `SEED_DEMO_PASSWORD` survives the dotenv parser **intact** (`Hisab#2026`, not `Hisab`), a
+second run leaves the file alone, and a broken environment (empty key, truncated secret) is
+refused with a readable reason.

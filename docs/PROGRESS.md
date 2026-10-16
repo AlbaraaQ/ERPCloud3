@@ -168,7 +168,7 @@ plus `git add -A` is how a session accidentally deletes a phase.
 | engine | `node scripts/dev-postgres.mjs --dir .pglite` | PostgreSQL 18.6 (PGlite) on 127.0.0.1:5432 |
 | schema + RLS + seed | `node scripts/db-reset.mjs` | 52 permission codes · platform owner · two demo tenants (tenant A id `01a1422b-a19c-7f39-8261-08cf41f0253f`) |
 | types | `npm run typecheck` | ✓ 0 errors |
-| suite | `set -a && . ./.env && set +a && npm test` | ✓ **22 files / 192 passed / 8 skipped / 0 failed** |
+| suite | `set -a && . ./.env && set +a && npm test` | ✓ **22 files / 192 passed / 8 skipped / 0 failed** (2 test files were added afterwards — see the re-verification table below) |
 | acceptance | `npm run acceptance:sweep -- --soak=20` | ✓ **39/39 checks** · soak mean 192 ms / p50 186 ms / p95 406 ms |
 | data safety | `npm run backup:run` · `verify` · `drill` | artifact sha `fbfbb66cd0da63d7…` · 81 tables / 1518 rows · verify 6/6 · drill 7/7 · RTO ≈ 1.7 s |
 
@@ -176,6 +176,54 @@ plus `git add -A` is how a session accidentally deletes a phase.
 > rebuilt database has new ids. Both runs are real, and neither is presented as a re-quote of the
 > other. `docs/RELEASE_READINESS.md` §8 records this rebuild as the end-to-end proof of the
 > onboarding path.
+
+### Continuation — “verify and fix everything”: the onboarding path, walked end to end
+
+The user reported two failures in the preview (`Invalid Server Actions request.` on login, and no
+`.env.example` for the guide's first command) and asked for a full sweep: **تحقّق وأصلح كل الأخطا**.
+Both were real, and following the path as a *new operator* found three more. All five are fixed, and
+each one now has an executable guard rather than a note.
+
+| # | What a first-time operator hit | Root cause | Fix / guard |
+|---|-------------------------------|-----------|-------------|
+| 1 | login 500 `Invalid Server Actions request.` behind the preview proxy (localhost fine) | the proxy makes `Origin` (public host) differ from `host` / `x-forwarded-host`; Next refuses Server Actions unless the public origin is allow-listed | `experimental.serverActions.allowedOrigins` in `next.config.ts`, overridable via `HISAB_ALLOWED_ORIGINS`; `npm run login:probe` posts with React's own client encoding from the preview origin and asserts a *foreign* origin is still refused |
+| 2 | `cp .env.example .env` — no such file | the template had never been committed | `.env.example` (tracked, secret-free, `!.env.example` in `.gitignore`) + `tests/unit/env-example.test.ts` |
+| 3 | every demo login failed even though the seed printed the right password | `SEED_DEMO_PASSWORD=Hisab#2026` was **truncated to `Hisab`** by the dotenv parser, and `db:seed` left existing users untouched | passwords quoted in `.env`/template; `scripts/env-check.mts` refuses a bare `#`; `db:seed` re-applies the environment password (demo users **and** the platform owner) and says so; `tests/unit/setup-workflow.test.ts` runs the real scripts and asserts the value survives parsing |
+| 4 | the console was unenterable on a fresh install | the login action returns `redirectTo: "/platform/login/enroll"` for an unenrolled operator, and the form **ignored that field** | `src/app/platform/login/login-form.tsx` navigates on `redirectTo` (plus a plain link); the probe completes login → enrollment → real RFC 6238 code → `/platform` 200 |
+| 5 | “it works on my machine” only — no proof the login path works *in the delivered conditions* | nothing exercised the proxy→Server-Action hop | `npm run login:probe` (15 checks) is now part of the pre-publish gate, documented in `RUNBOOK.md` and the guide |
+
+**The workflow the user asked for, kept by name and order:**
+
+```bash
+npm run env:setup     # .env from the template; key generated; passwords written quoted
+npm run env:check     # early, bilingual refusal of an empty key or a truncated secret
+npm run db:migrate    # schema + src/db/rls.sql (227 policies) — non-destructive, safe to repeat
+npm run db:seed       # catalog, platform owner, two demo tenants — idempotent
+npm run login:probe   # both login surfaces, from a proxied origin — 15/15
+```
+
+`db:migrate` is deliberately a *migration* and not a reset: it reports `✓ schema current — 227
+policies active` and never drops data (`db:reset` stays the destructive, dev-only path). The probe's
+console section runs on a **temporary probe account**, never the real owner — enrolling (or
+throttling) a real operator while testing would be a worse bug than the one being tested. The probe
+account is left `disabled`, because deleting it is refused by design: `platform_audit_log` is
+append-only with a foreign key to `platform_users` (SQLSTATE 23001), so an operator who ever signed
+in cannot be erased. That refusal is honoured, not worked around.
+
+**Re-verified after all five fixes** (fresh run, same workspace):
+
+| Gate | Result |
+|------|--------|
+| `npm run typecheck` | ✓ 0 errors |
+| `set -a && . ./.env && set +a && npm test` | ✓ **23 files / 202 passed / 8 skipped / 0 failed** |
+| `npm run build` | ✓ compiled successfully (14.6 s), all routes emitted |
+| `npm run login:probe` | ✓ **LOGIN PROBE PASSED — 15/15** |
+| `npm run acceptance:sweep -- --soak=10` | ✓ **ACCEPTANCE SWEEP PASSED — 39/39** (soak mean 157 ms · p50 150 ms · p95 251 ms) |
+
+> One sweep run in this session reported 38/39 with `soak: 20 requests, 20 failures` and 1 ms
+> “latencies”: the dev server had been reaped mid-run. The sweep now prints that diagnosis, including
+> the first failing route, instead of twenty identical numbers — a measurement that cannot fail
+> loudly is not a measurement.
 
 ### Exact next step (Phase 10, continued)
 

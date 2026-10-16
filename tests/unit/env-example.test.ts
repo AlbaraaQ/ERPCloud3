@@ -71,6 +71,9 @@ const REFERENCED = (() => {
   return found;
 })();
 
+/** The documented setup workflow: environments come from the template, not from instructions. */
+const WORKFLOW = ["env:setup", "env:check", "db:migrate", "db:seed", "login:probe"] as const;
+
 const SECRET_KEYS = [
   "HISAB_ENCRYPTION_KEY",
   "SEED_BOOTSTRAP_PASSWORD",
@@ -149,5 +152,65 @@ describe("template safety", () => {
 
   it("keeps live restore off by default", () => {
     expect(ASSIGNED.get("HISAB_ALLOW_LIVE_RESTORE")).toBeUndefined();
+  });
+});
+
+describe("the documented setup workflow exists", () => {
+  const pkg = JSON.parse(read("package.json")) as { scripts: Record<string, string> };
+
+  it("declares every npm script the guide tells the operator to run", () => {
+    const missing = WORKFLOW.filter((name) => !pkg.scripts[name]);
+    expect(missing, "documented npm script is not declared in package.json").toEqual([]);
+    for (const name of WORKFLOW) {
+      expect(pkg.scripts[name], `${name} must point at a script file`).toMatch(/scripts\//);
+      const file = /scripts\/([\w.-]+)/.exec(pkg.scripts[name]!)?.[1];
+      expect(file && read(`scripts/${file}`).length > 0, `scripts/${file} is missing`).toBe(true);
+    }
+  });
+
+  it("is the workflow the guide actually documents", () => {
+    for (const name of WORKFLOW) {
+      expect(GUIDE, `OPERATIONS_GUIDE.md never mentions \`npm run ${name}\``).toContain(`npm run ${name}`);
+    }
+    // the quick start must not hand the operator a raw copy step as the *primary* path
+    const quickStart = GUIDE.split("### 1.2")[1]?.split("### 1.3")[0] ?? "";
+    expect(quickStart).toContain("npm run env:setup");
+    expect(quickStart).toContain("npm run db:migrate");
+    expect(quickStart).toContain("npm run db:seed");
+    expect(GUIDE).toContain("npm run env:setup"); // and the runbook's quick reference too
+    expect(read("docs/RUNBOOK.md")).toContain("npm run login:probe");
+  });
+
+  it("quotes values a dotenv parser would truncate", () => {
+    // The seeded password contains '#'. The template stays secret-free (empty values), so the
+    // *setup script* writes it — and it must quote it, because a bare `Hisab#2026` silently
+    // becomes `Hisab`, which reached a user as "login gives an error".
+    const setup = read("scripts/env-setup.mts");
+    const seeded = /DEFAULT_PASSWORD = "([^"]+)"/.exec(setup)?.[1] ?? "";
+    expect(seeded, "env-setup must state the default demo password").not.toBe("");
+    expect(/[#'"\s]/.test(seeded), "this password only needs quoting because it has #").toBe(true);
+    // the behavioural proof lives in setup-workflow.test.ts (it runs env:setup and parses .env)
+    // and the operator is told the rule in both the template and the guide
+    expect(TEMPLATE).toContain("علامتي تنصيص");
+    expect(GUIDE).toContain("علامتي تنصيص");
+  });
+});
+
+describe("server-action origins are configured, not assumed", () => {
+  const config = read("next.config.ts");
+
+  it("allow-lists the preview host so forms work behind the proxy", () => {
+    // Regression: without this, a browser in the preview got
+    // "Invalid Server Actions request." on every POST (login included).
+    const block = /serverActions:\s*{([^}]*)}/.exec(config)?.[1] ?? "";
+    expect(block, "next.config.ts must configure experimental.serverActions").not.toBe("");
+    expect(block).toMatch(/allowedOrigins/);
+    expect(config).toMatch(/e2b\.app/);
+  });
+
+  it("keeps the asset allow-list and the action allow-list in the same place", () => {
+    expect(config).toContain("allowedDevOrigins");
+    expect(config).toContain("HISAB_ALLOWED_ORIGINS");
+    expect(TEMPLATE).toContain("HISAB_ALLOWED_ORIGINS");
   });
 });
