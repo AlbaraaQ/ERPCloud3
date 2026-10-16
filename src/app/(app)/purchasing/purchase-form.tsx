@@ -107,17 +107,19 @@ export function PurchaseForm({
       <div className="space-y-2">
         {lines.map((l, i) => (
           <div key={i} className="grid items-end gap-2 rounded-xl border border-border p-3 sm:grid-cols-[1fr_100px_110px_120px_140px_36px]">
-            <select className="input !py-2" value={l.productId} onChange={(e) => update(i, { productId: e.target.value })}>
+            <select aria-label={`${t.purchasing.product} ${i + 1}`} className="input !py-2" value={l.productId}
+              onChange={(e) => update(i, { productId: e.target.value })}>
               <option value="">{t.purchasing.product}…</option>
               {products.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
             </select>
-            <input className="input tnum !py-2 text-end" dir="ltr" inputMode="decimal" placeholder={t.purchasing.qty}
+            <input aria-label={`${t.purchasing.qty} ${i + 1}`} className="input tnum !py-2 text-end" dir="ltr" inputMode="decimal" placeholder={t.purchasing.qty}
               value={l.qty} onChange={(e) => update(i, { qty: e.target.value.replace(/[^0-9.]/g, "") })} />
-            <input className="input tnum !py-2 text-end" dir="ltr" inputMode="decimal" placeholder={t.purchasing.cost}
+            <input aria-label={`${t.purchasing.cost} ${i + 1}`} className="input tnum !py-2 text-end" dir="ltr" inputMode="decimal" placeholder={t.purchasing.cost}
               value={l.cost} onChange={(e) => update(i, { cost: e.target.value.replace(/[^0-9.]/g, "") })} />
-            <input className="input !py-2" placeholder={t.purchasing.batch} value={l.batchNo} onChange={(e) => update(i, { batchNo: e.target.value })} />
-            <input type="date" className="input !py-2" value={l.expiry} onChange={(e) => update(i, { expiry: e.target.value })} />
+            <input aria-label={`${t.purchasing.batch} ${i + 1}`} className="input !py-2" placeholder={t.purchasing.batch} value={l.batchNo} onChange={(e) => update(i, { batchNo: e.target.value })} />
+            <input aria-label={`${t.purchasing.expiry} ${i + 1}`} type="date" className="input !py-2" value={l.expiry} onChange={(e) => update(i, { expiry: e.target.value })} />
             <button type="button" onClick={() => setLines((p) => p.filter((_, idx) => idx !== i))}
+              title={`${t.common.removeLine} ${i + 1}`} aria-label={`${t.common.removeLine} ${i + 1}`}
               className="rounded-lg p-2 text-muted hover:bg-danger-soft hover:text-danger">
               <Trash2 className="h-4 w-4" />
             </button>

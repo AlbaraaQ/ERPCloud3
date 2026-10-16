@@ -110,7 +110,10 @@ export default function RepPos() {
 
   if (products.length === 0 && customers.length === 0) {
     return (
-      <div className="card p-6 text-center text-sm text-muted">{t.rep.emptyCatalog}</div>
+      <div className="card p-6 text-center text-sm text-muted">
+        <h1 className="mb-2 text-xl font-bold text-foreground">{t.rep.posTitle}</h1>
+        {t.rep.emptyCatalog}
+      </div>
     );
   }
 
@@ -166,6 +169,7 @@ export default function RepPos() {
         <Search className="pointer-events-none absolute end-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
         <input value={search} onChange={(e) => setSearch(e.target.value)} className="input pe-10"
           placeholder={t.rep.searchPlaceholder}
+          aria-label={t.rep.searchPlaceholder}
           onKeyDown={(e) => { if (e.key === "Enter" && matches[0]) { e.preventDefault(); addLine(matches[0]); } }} />
         {matches.length > 0 && (
           <ul className="absolute z-20 mt-1 max-h-72 w-full overflow-auto rounded-xl border border-border bg-surface shadow-xl">
@@ -220,7 +224,7 @@ export default function RepPos() {
                     onClick={() => update(i, { qty: String(Math.max(1, Number(l.qty) - 1)) })}>
                     <Minus className="h-4 w-4" />
                   </button>
-                  <input dir="ltr" inputMode="decimal" className="tnum w-12 rounded-lg border border-border bg-surface py-1 text-center"
+                  <input dir="ltr" inputMode="decimal" className="tnum w-12 rounded-lg border border-input bg-surface py-1 text-center"
                     value={l.qty} onChange={(e) => update(i, { qty: e.target.value.replace(/[^0-9.]/g, "") })} />
                   <button type="button" className="rounded-lg border border-border p-1"
                     onClick={() => update(i, { qty: String(Number(l.qty) + 1) })}>
@@ -228,7 +232,7 @@ export default function RepPos() {
                   </button>
                 </div>
                 <input dir="ltr" inputMode="decimal" disabled={l.free}
-                  className="tnum rounded-lg border border-border bg-surface py-1.5 text-center disabled:opacity-50"
+                  className="tnum rounded-lg border border-input bg-surface py-1.5 text-center disabled:opacity-50"
                   value={l.free ? "0" : l.price}
                   onChange={(e) => update(i, { price: e.target.value.replace(/[^0-9.]/g, "") })} />
                 <div className="tnum grid place-items-center text-sm font-bold text-primary" dir="ltr">

@@ -33,9 +33,9 @@ export function MappingRow({ mapKey, nameAr, accountId, accounts, saveLabel, mis
 
   return (
     <tr className="border-b border-border/60">
-      <td className="py-2 pe-2 text-sm font-medium">{nameAr}</td>
+      <th scope="row" className="py-2 pe-2 text-start text-sm font-medium">{nameAr}</th>
       <td className="py-2">
-        <select className="input !py-1.5 text-xs" value={value} onChange={(e) => setValue(e.target.value)}>
+        <select aria-label={nameAr} className="input !py-1.5 text-xs" value={value} onChange={(e) => setValue(e.target.value)}>
           <option value="">—</option>
           {accounts.map((a) => (
             <option key={a.id} value={a.id}>

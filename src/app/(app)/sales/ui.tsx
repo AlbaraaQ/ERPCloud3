@@ -191,8 +191,9 @@ export function ReturnInline({
                   <span className="min-w-0 flex-1 truncate">{l.productName}</span>
                   <span className="tnum text-muted" dir="ltr">{remaining}</span>
                   <input
+                    aria-label={`${t.salesPg.returnQty} — ${l.productName}`}
                     dir="ltr" inputMode="decimal"
-                    className="tnum w-16 rounded-lg border border-border bg-surface px-1.5 py-1 text-end"
+                    className="tnum w-16 rounded-lg border border-input bg-surface px-1.5 py-1 text-end"
                     placeholder="0"
                     value={qty[l.lineId] ?? ""}
                     onChange={(e) => setQty((q) => ({ ...q, [l.lineId]: e.target.value.replace(/[^0-9.]/g, "") }))}

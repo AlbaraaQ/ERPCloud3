@@ -193,7 +193,8 @@ export function PosScreen(p: Props) {
     <div className="grid gap-5 lg:grid-cols-[1fr_360px]">
       {/* right (cart) */}
       <section className="card flex min-h-[70vh] flex-col p-5">
-        <div className="flex flex-wrap items-center gap-3 border-b border-border pb-4">
+        <h1 className="sr-only">{t.nav.pos}</h1>
+      <div className="flex flex-wrap items-center gap-3 border-b border-border pb-4">
           <label className="flex min-w-52 flex-1 items-center gap-2">
             <UserRound className="h-4 w-4 shrink-0 text-muted" />
             <select
@@ -230,7 +231,8 @@ export function PosScreen(p: Props) {
               {t.pos.creditSale}
             </button>
           </div>
-          <select className="input w-auto" value={warehouseId} onChange={(e) => setWarehouseId(e.target.value)}>
+          <select aria-label={t.inventory.warehouse} className="input w-auto" value={warehouseId}
+            onChange={(e) => setWarehouseId(e.target.value)}>
             {p.warehouses.map((w) => (
               <option key={w.id} value={w.id}>{w.name}</option>
             ))}
@@ -251,6 +253,7 @@ export function PosScreen(p: Props) {
             }}
             className="input pe-10"
             placeholder={t.pos.searchPlaceholder}
+            aria-label={t.pos.searchPlaceholder}
           />
           {matches.length > 0 && (
             <ul className="absolute z-20 mt-1 max-h-64 w-full overflow-auto rounded-xl border border-border bg-surface shadow-xl">
@@ -330,7 +333,7 @@ export function PosScreen(p: Props) {
                           </button>
                           <input
                             dir="ltr" inputMode="decimal"
-                            className="tnum w-14 rounded-lg border border-border bg-surface py-1 text-center text-sm"
+                            className="tnum w-14 rounded-lg border border-input bg-surface py-1 text-center text-sm"
                             value={l.qty}
                             onChange={(e) => update(i, { qty: e.target.value.replace(/[^0-9.]/g, "") })}
                           />
@@ -352,7 +355,7 @@ export function PosScreen(p: Props) {
                       <td className="py-2">
                         <input
                           dir="ltr" inputMode="decimal" disabled={l.free}
-                          className="tnum w-full rounded-lg border border-border bg-surface py-1 text-end text-sm disabled:opacity-50"
+                          className="tnum w-full rounded-lg border border-input bg-surface py-1 text-end text-sm disabled:opacity-50"
                           value={l.free ? "0" : l.discount}
                           onChange={(e) => update(i, { discount: e.target.value.replace(/[^0-9.]/g, "") })}
                         />

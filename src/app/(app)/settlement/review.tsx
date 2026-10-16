@@ -173,7 +173,7 @@ export function SettlementReview({ t, errors, settlement, lines, exceptions, can
                             <td className="tnum py-2 text-end font-semibold" dir="ltr">{Number(l.expectedQty)}</td>
                             <td className="py-2 text-end">
                               <input dir="ltr" inputMode="decimal"
-                                className="tnum w-24 rounded-lg border border-border bg-surface py-1 text-end"
+                                className="tnum w-24 rounded-lg border border-input bg-surface py-1 text-end"
                                 value={counted}
                                 onChange={(e) => setCounts((c) => ({ ...c, [l.productId]: e.target.value.replace(/[^0-9.]/g, "") }))} />
                             </td>

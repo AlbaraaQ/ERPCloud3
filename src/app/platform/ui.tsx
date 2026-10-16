@@ -141,7 +141,14 @@ export function Message({ tone, text }: { tone: "danger" | "success" | "warning"
       : tone === "warning"
         ? "border-warning/40 bg-warning-soft text-warning"
         : "border-success/40 bg-success-soft text-success";
-  return <p className={`mt-3 rounded-xl border px-3 py-2 text-xs font-semibold ${cls}`}>{text}</p>;
+  // Announced, not merely shown: a failed save that only paints red pixels is invisible to a
+  // screen reader, and every console form reports its outcome through this one component.
+  const role = tone === "success" ? "status" : "alert";
+  return (
+    <p role={role} className={`mt-3 rounded-xl border px-3 py-2 text-xs font-semibold ${cls}`}>
+      {text}
+    </p>
+  );
 }
 
 export function Badge({

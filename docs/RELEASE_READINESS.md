@@ -7,7 +7,7 @@
 code-complete for every phase whose exit criteria could be executed in this environment, all
 gates below are green, and the operational documentation exists. What is *missing* is not polish
 but environmental and process capability: versioned migrations, off-site backup transport, a real
-ZATCA credential cycle, browser-driven E2E/accessibility coverage, deployment automation, and the
+ZATCA credential cycle, browser-driven rendering coverage, deployment automation, and the
 open legal questions. Each is listed in §5 with what would close it.
 
 Recommended use **today**: internal demo / UAT on a controlled environment (single node, demo
@@ -21,7 +21,9 @@ to ZATCA, or any multi-tenant hosting of real customer books.
 | Gate | Command | Result |
 |---|---|---|
 | Types | `npm run typecheck` | ✅ exit 0, 0 errors |
-| Test suite | `set -a && . ./.env && set +a && npm test` | ✅ **23 files / 202 passed / 8 skipped / 0 failed** |
+| Test suite | `set -a && . ./.env && set +a && npm test` | ✅ **24 files / 259 passed / 8 skipped / 0 failed** |
+| Screen accessibility (structure) | `npm run a11y:audit` | ✅ **A11Y AUDIT PASSED — 28 screens, no violations** (language + direction, one h1, heading order, control and button names, tab order, table headers, unique ids, colour-independence) |
+| Screen accessibility (colour) | `npx vitest run tests/unit/a11y-tokens.test.ts` | ✅ **57 assertions** — every documented foreground/background pair in both themes ≥4.5:1; focus ring and control outline ≥3:1 |
 | Login transport (both surfaces) | `npm run login:probe` | ✅ **LOGIN PROBE PASSED — 15/15** (tenant login from a proxied origin → 303 + session → `/dashboard`; console: login → enrollment → TOTP code → `/platform` 200; foreign origin refused) |
 | Production build | `npm run build` | ✅ "Compiled successfully in 13.2s", all routes emitted |
 | End-to-end HTTP sweep | `npm run acceptance:sweep -- --soak=20` | ✅ **ACCEPTANCE SWEEP PASSED — 39/39 checks** |
@@ -70,13 +72,13 @@ here (no client binaries), so `backup_runs.format = logical-json`; remote transp
 
 | Phase 10 item | Status | Evidence / what is left |
 |---|---|---|
-| RTL & bilingual sweep | **Partial** | Dictionaries are type-locked (`en` must match the `ar` shape, so a missing translation is a compile error); every new screen was verified in Arabic. A screen-by-screen visual RTL audit (numbers, dates, icon direction, print templates) has **not** been performed. |
-| Accessibility audit (AA) | **Partial** | Assistant screens now expose `role="log"` + `aria-live="polite"` + `aria-busy`, `role="status"`/`role="alert"` banners and labelled inputs; the acceptance sweep asserts the RTL shell renders. Contrast ratios, focus order, keyboard traps and screen-reader passes across all ~40 screens are **not** audited. |
-| Status-semantics audit (never colour-only) | **Partial** | Status text is present in the assistant screens and console cards; a systematic colour-independence check across every status badge is **outstanding**. |
+| RTL & bilingual sweep | **Partial (structural half done)** | Dictionaries are type-locked (`en` must match the `ar` shape, so a missing translation is a compile error); the audit asserts `lang`/`dir="rtl"` on all 28 screens; every physical direction utility (`ml-`, `pl-`, `text-left`, `left-`) is absent from the whole tree — spacing and alignment are logical (`ms-`, `pe-`, `text-start`), so mirroring cannot break. A human visual pass over numbers, dates, icon direction and print output is still outstanding. |
+| Accessibility audit (AA) | **Largely done (automated), manual pass outstanding** | `npm run a11y:audit` reads all **28** reachable screens as documents and passes: language + direction, exactly one h1 per screen, no skipped heading level, a name for every control (a wrapping label, `aria-label`, or a title — a placeholder is explicitly not a name), a name for every button and link, natural tab order, nothing focusable inside `aria-hidden`, a header cell in every table, unique ids, and no state signalled by colour alone. Colour is checked separately by `tests/unit/a11y-tokens.test.ts` (57 assertions, both themes: text pairs ≥4.5:1, focus ring and control outline ≥3:1). What remains is not automatable in this sandbox: a real screen-reader pass in Arabic and a keyboard-only sweep of the POS/assistant flows. The English locale is type-checked but has never been *seen* by a human. |
+| Status-semantics audit (never colour-only) | **Done (automated)** | Every tinted chip on every screen must contain text or an icon whose shape carries the meaning, and warnings are held a minimum hue distance from failures; `warning` no longer shares the failure hue in either theme. |
 | Load / soak smoke | **Smoke only** | §2 soak row. No capacity claim. |
 | Security review (authZ matrix re-verified) | **Partial (automated)** | New structural suite `tests/unit/ui-guards.test.ts` (11 assertions): every page is behind a session/platform guard (page or its layouts), console pages resolve a platform context, the console has exactly one layout door, every permission named at a guard site exists in the right catalogue, navigation uses real tenant codes only, the ops role holds no destructive code, unknown roles get an empty set, and only four named non-platform files may import platform services. Behavioural coverage continues in the integration suites (tenant isolation, authZ matrix, platform ops). No third-party penetration test is possible in this environment. |
 | Backup restore re-drill | **Done** | §3. |
-| Full E2E acceptance run (AC list) | **Partial** | Automated: the 39-check HTTP sweep + 21 test files. **Not** executable here: printed-document checks, offline rep device behaviour, real ZATCA round-trip, browser-driven UI flows (no Playwright in this build). |
+| Full E2E acceptance run (AC list) | **Partial** | Automated: the 39-check HTTP sweep + 24 test files + the 28-screen accessibility audit. **Not** executable here: printed-document checks, offline rep device behaviour, real ZATCA round-trip, browser-driven UI flows (no Playwright in this build). |
 | Deployment & rollback runbook | **Done (untested on a real host)** | `docs/RUNBOOK.md` §2–§3. |
 | Operational runbooks | **Done** | `docs/RUNBOOK.md` §4–§5 (routine jobs, alert semantics, six incident playbooks) + `docs/OPERATIONS_GUIDE.md` (Arabic, user-facing). |
 | Release-readiness report | **Done** | this file. |
@@ -95,9 +97,10 @@ here (no client binaries), so `backup_runs.format = logical-json`; remote transp
    one full cycle on Simulation with real credentials, then a signed-off production run.
 4. **No legal sign-off** (OQ-2/3/4). Retention, e-invoicing obligations and data-residency choices
    are recorded as questions, not answers.
-5. **No browser-driven E2E / accessibility audit.** Nothing verifies visual behaviour, printing or
-   keyboard navigation automatically. *Closes with:* Playwright (or equivalent) plus a manual AA
-   pass.
+5. **No browser-driven E2E.** Structure and colour are now audited automatically (`npm run
+   a11y:audit` over 28 screens, `a11y-tokens.test.ts` over both themes), but nothing *renders* the
+   pages in a real engine: visual behaviour, printing and keyboard-only navigation are unverified.
+   *Closes with:* Playwright (or equivalent) plus a human AA and RTL pass.
 6. **No deployment automation / observability integration.** No containers, IaC, CI pipeline,
    external paging, or metrics/monitoring endpoint beyond `/api/health` and the console.
 7. **Known functional gaps** (documented, not defects): PDF export, R-05/R-10/R-12/R-24/R-27 and
@@ -115,6 +118,7 @@ here (no client binaries), so `backup_runs.format = logical-json`; remote transp
 | 6b | **Login returned HTTP 500 in the preview** with `Invalid Server Actions request.` — the proxy makes `Origin` (the public preview host) differ from `host`/`x-forwarded-host` (the upstream), and Next.js refuses a Server Action unless the public origin is allow-listed. Every form in the app was affected; `localhost` looked fine | `next.config.ts` (new `experimental.serverActions.allowedOrigins`, overridable with `HISAB_ALLOWED_ORIGINS`) | fixed and locked by `npm run login:probe` (15 checks, runs the real RSC client encoding from the preview origin, and asserts a **foreign** origin is still refused) |
 | 6c | `SEED_DEMO_PASSWORD=Hisab#2026` in `.env` was **truncated to `Hisab`** by the dotenv parser (`#` starts a comment). The seed therefore hashed `Hisab` while the operator typed `Hisab#2026`: **every demo login failed**, and `db:seed` never repaired it because existing users were left untouched. The platform owner had the same problem | `scripts/seed.ts`, `.env.example`, `scripts/env-check.mts` | seed now re-applies the environment password for existing demo users *and* the platform owner (so the printed sign-in line is true); `env:setup` writes the value quoted; `env:check` refuses a bare `#`; guarded by `tests/unit/setup-workflow.test.ts` (runs the real scripts and parses the result) |
 | 6d | The console login action returns `redirectTo: "/platform/login/enroll"` for an operator who is not TOTP-enrolled, but the form **ignored that field** — a fresh installation could not reach enrollment, so the console was unenterable | `src/app/platform/login/login-form.tsx` | form now navigates on `redirectTo` and also renders a link (keyboard/no-JS path); the probe walks the whole flow and ends with `/platform` 200 |
+| 6e | **Nine screens failed a WCAG AA pass.** The audit found 77 violations: the light focus ring was 2.49:1 against a white card (1.4.11 wants 3:1), so a keyboard user could lose the caret; `--warning` text on `bg-warning-soft` was 4.26:1 (1.4.3 wants 4.5) — every "expiring soon" chip; a form control's outline was 1.23:1, and since the field is filled like the card behind it, that outline was the only thing identifying it; the login hero's 12 px tagline was white/70 on teal = 3.54:1; ~58 controls (the ledger grid, purchase lines, BOM/order/scrap forms) had a placeholder but **no name**, so a screen reader announced "edit text"; two icon-only buttons had no name at all; three tables had no header cell; two screens had no h1 and three skipped a heading level; the console's `Message` — the single component every console form reports success or failure through — was a plain `<p>`, so nothing was announced | `src/app/globals.css`, 11 screen files, `src/i18n/{ar,en}.ts` | every one fixed: new `--input` outline token (light `#7d8b99`, dark `#5a6b7f`), ring `#14b8a6` → `#0d9488`, warning `#b45309` → `#92400e`, row-scoped `<th>`, `<h1 className="sr-only">` on POS, `role="alert"/"status"` on console messages, translated `aria-label`s carrying the row number ("مدين ٣"). Locked in two layers: `tests/unit/a11y-tokens.test.ts` (57 assertions on the colour maths, both themes — mutation-tested by restoring the old ring, which failed at 2.49) and `npm run a11y:audit` (reads all 28 screens as documents; the pre-fix run is its own control at 77 violations, now **0**) |
 | 6 | The operations guide instructed `cp .env.example .env`, but **`.env.example` did not exist** — the very first onboarding step an operator would run was impossible | `docs/OPERATIONS_GUIDE.md` vs repository root | template written (documented, secret-free, `.gitignore` negated for it) **and** locked by `tests/unit/env-example.test.ts` (8 assertions: every variable read by `src/`/`scripts/` is declared, every variable in the guide's table is declared, no secret is filled in, live-restore stays off by default). Mutation-verified twice: removing `PG_POOL_MAX` and filling `HISAB_ENCRYPTION_KEY` each failed the suite. The template then performed the rebuild it documents (§8). |
 
 No defect was closed by weakening a test or by loosening a validator.

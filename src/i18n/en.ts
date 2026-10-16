@@ -1207,6 +1207,8 @@ export const en: Dict = {
   common: {
     save: "Save",
     cancel: "Cancel",
+    removeLine: "Remove line",
+    description: "Description",
     search: "Search",
     loading: "Loading…",
     empty: "No data",

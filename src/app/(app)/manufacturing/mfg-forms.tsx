@@ -54,7 +54,7 @@ export function BomForm({ t, errors, products }: { t: Dict; errors: Record<strin
 
   return (
     <section className="card space-y-4 p-5">
-      <h3 className="font-semibold">{t.mfg.newBom}</h3>
+      <h2 className="font-semibold">{t.mfg.newBom}</h2>
       <div className="grid gap-3 sm:grid-cols-3">
         <label className="block text-sm">
           <span className="mb-1 block font-medium">{t.mfg.product}</span>
@@ -74,13 +74,15 @@ export function BomForm({ t, errors, products }: { t: Dict; errors: Record<strin
       </div>
       {lines.map((l, i) => (
         <div key={i} className="grid grid-cols-[1fr_120px_36px] items-center gap-2">
-          <select className="input !py-2" value={l.productId} onChange={(e) => setLines((p) => p.map((x, idx) => (idx === i ? { ...x, productId: e.target.value } : x)))}>
+          <select aria-label={`${t.mfg.addComponent} ${i + 1}`} className="input !py-2" value={l.productId}
+            onChange={(e) => setLines((p) => p.map((x, idx) => (idx === i ? { ...x, productId: e.target.value } : x)))}>
             <option value="">{t.mfg.addComponent}…</option>
             {products.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
           </select>
-          <input dir="ltr" inputMode="decimal" className="input tnum !py-2 text-end" value={l.qty}
+          <input aria-label={`${t.mfg.componentQty} ${i + 1}`} dir="ltr" inputMode="decimal" className="input tnum !py-2 text-end" value={l.qty}
             onChange={(e) => setLines((p) => p.map((x, idx) => (idx === i ? { ...x, qty: e.target.value.replace(/[^0-9.]/g, "") } : x)))} />
           <button type="button" onClick={() => setLines((p) => p.filter((_, idx) => idx !== i))}
+            title={`${t.common.removeLine} ${i + 1}`} aria-label={`${t.common.removeLine} ${i + 1}`}
             className="rounded-lg p-2 text-muted hover:bg-danger-soft hover:text-danger">
             <Trash2 className="h-4 w-4" />
           </button>
@@ -122,18 +124,19 @@ export function OrderForm({ t, errors, boms, warehouses }: { t: Dict; errors: Re
 
   return (
     <form onSubmit={onSubmit} className="card space-y-3 p-5">
-      <h3 className="font-semibold">{t.mfg.newOrder}</h3>
+      <h2 className="font-semibold">{t.mfg.newOrder}</h2>
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <select name="bomId" required className="input">
+        <select name="bomId" required aria-label={t.mfg.bom} className="input">
           <option value="">{t.mfg.bom}…</option>
           {boms.map((b) => <option key={b.id} value={b.id}>{b.label}</option>)}
         </select>
-        <input name="plannedQty" required dir="ltr" inputMode="decimal" className="input tnum text-end" placeholder={t.mfg.plannedQty} />
-        <select name="fromWarehouseId" required className="input">
+        <input name="plannedQty" required aria-label={t.mfg.plannedQty} dir="ltr" inputMode="decimal"
+          className="input tnum text-end" placeholder={t.mfg.plannedQty} />
+        <select name="fromWarehouseId" required aria-label={t.mfg.fromWh} className="input">
           <option value="">{t.mfg.fromWh}…</option>
           {warehouses.map((w) => <option key={w.id} value={w.id}>{w.label}</option>)}
         </select>
-        <select name="toWarehouseId" required className="input">
+        <select name="toWarehouseId" required aria-label={t.mfg.toWh} className="input">
           <option value="">{t.mfg.toWh}…</option>
           {warehouses.map((w) => <option key={w.id} value={w.id}>{w.label}</option>)}
         </select>
@@ -235,7 +238,8 @@ export function OrderCard({
                       <td className="py-2">{l.productName}</td>
                       <td className="tnum py-2 text-end" dir="ltr">{Number(l.plannedQty).toFixed(3)}</td>
                       <td className="py-2 text-end">
-                        <input dir="ltr" inputMode="decimal" className="tnum w-24 rounded-lg border border-border bg-surface py-1 text-end"
+                        <input aria-label={`${t.mfg.componentQty} — ${l.productName}`} dir="ltr" inputMode="decimal"
+                          className="tnum w-24 rounded-lg border border-input bg-surface py-1 text-end"
                           defaultValue={Number(l.actualQty).toFixed(3)}
                           onChange={(e) => setOverrides((o) => ({ ...o, [l.bomLineId]: e.target.value.replace(/[^0-9.]/g, "") || String(l.actualQty) }))} />
                       </td>
@@ -273,7 +277,7 @@ export function OrderCard({
         <>
           {/* components */}
           <div className="space-y-2">
-            <h4 className="text-sm font-semibold">{t.mfg.costComponents}</h4>
+            <h3 className="text-sm font-semibold">{t.mfg.costComponents}</h3>
             {components.map((c) => (
               <div key={c.id} className="flex items-center justify-between rounded-lg bg-surface-2 px-3 py-2 text-sm">
                 <span>{c.description} ({c.kind === "labor" ? t.mfg.labor : c.kind === "overhead" ? t.mfg.overhead : t.mfg.other})</span>
@@ -281,14 +285,16 @@ export function OrderCard({
               </div>
             ))}
             <div className="grid grid-cols-[110px_1fr_130px_auto] gap-2">
-              <select className="input !py-2" value={componentForm.kind} onChange={(e) => setComponentForm((f) => ({ ...f, kind: e.target.value }))}>
+              <select aria-label={t.mfg.costComponents} className="input !py-2" value={componentForm.kind}
+                onChange={(e) => setComponentForm((f) => ({ ...f, kind: e.target.value }))}>
                 <option value="labor">{t.mfg.labor}</option>
                 <option value="overhead">{t.mfg.overhead}</option>
                 <option value="other">{t.mfg.other}</option>
               </select>
-              <input className="input !py-2" placeholder="الوصف" value={componentForm.description}
+              <input aria-label={t.common.description} className="input !py-2" placeholder={t.common.description}
+                value={componentForm.description}
                 onChange={(e) => setComponentForm((f) => ({ ...f, description: e.target.value }))} />
-              <input dir="ltr" inputMode="decimal" className="input tnum !py-2 text-end" placeholder={t.mfg.amount}
+              <input aria-label={t.mfg.amount} dir="ltr" inputMode="decimal" className="input tnum !py-2 text-end" placeholder={t.mfg.amount}
                 value={componentForm.amount}
                 onChange={(e) => setComponentForm((f) => ({ ...f, amount: e.target.value.replace(/[^0-9.]/g, "") }))} />
               <button
@@ -315,15 +321,17 @@ export function OrderCard({
           <details className="rounded-xl border border-border p-3">
             <summary className="cursor-pointer text-sm font-semibold text-danger">{t.mfg.recordScrap}</summary>
             <div className="mt-3 grid grid-cols-[1fr_110px_110px_auto] items-center gap-2">
-              <select className="input !py-2" value={scrapForm.productId} onChange={(e) => setScrapForm((f) => ({ ...f, productId: e.target.value }))}>
+              <select aria-label={t.mfg.recordScrap} className="input !py-2" value={scrapForm.productId}
+                onChange={(e) => setScrapForm((f) => ({ ...f, productId: e.target.value }))}>
                 <option value="">—</option>
                 {consumables.map((c, i) => (
                   <option key={i} value={c.productId}>{c.productName}</option>
                 ))}
               </select>
-              <input dir="ltr" inputMode="decimal" className="input tnum !py-2 text-end" placeholder={t.inventory.qty}
+              <input aria-label={t.inventory.qty} dir="ltr" inputMode="decimal" className="input tnum !py-2 text-end" placeholder={t.inventory.qty}
                 value={scrapForm.qty} onChange={(e) => setScrapForm((f) => ({ ...f, qty: e.target.value.replace(/[^0-9.]/g, "") }))} />
-              <select className="input !py-2" value={String(scrapForm.abnormal)} onChange={(e) => setScrapForm((f) => ({ ...f, abnormal: e.target.value === "true" }))}>
+              <select aria-label={t.mfg.recordScrap} className="input !py-2" value={String(scrapForm.abnormal)}
+                onChange={(e) => setScrapForm((f) => ({ ...f, abnormal: e.target.value === "true" }))}>
                 <option value="false">{t.mfg.normal}</option>
                 <option value="true">{t.mfg.abnormal}</option>
               </select>
@@ -429,7 +437,8 @@ export function RecallTrace({ t, errors }: { t: Dict; errors: Record<string, str
       <h3 className="flex items-center gap-2 font-semibold"><FlaskConical className="h-4 w-4 text-primary" /> {t.mfg.recall}</h3>
       <p className="text-xs text-muted">{t.mfg.recallHint}</p>
       <div className="flex gap-2">
-        <input dir="ltr" className="input flex-1" placeholder="lot uuid…" value={lotId} onChange={(e) => setLotId(e.target.value)} />
+        <input aria-label={t.mfg.trace} dir="ltr" className="input flex-1" placeholder="lot uuid…"
+          value={lotId} onChange={(e) => setLotId(e.target.value)} />
         <button type="button" onClick={trace} disabled={busy || !lotId.trim()} className="btn btn-primary disabled:opacity-40">
           {busy ? t.common.loading : t.mfg.trace}
         </button>

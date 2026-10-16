@@ -111,17 +111,18 @@ export function JournalForm({ t, accounts, defaultDate, errors }: { t: Dict; acc
             {lines.map((l, i) => (
               <tr key={i} className="border-b border-border/60">
                 <td className="py-1.5 pe-2">
-                  <select className="input" value={l.accountId} onChange={(e) => update(i, { accountId: e.target.value })}>
+                  <select aria-label={`${t.accounting.account} ${i + 1}`} className="input" value={l.accountId}
+                    onChange={(e) => update(i, { accountId: e.target.value })}>
                     <option value="">—</option>
                     {accounts.map(opt)}
                   </select>
                 </td>
                 <td className="py-1.5 px-1">
-                  <input dir="ltr" inputMode="decimal" className="input tnum text-end" value={l.debit}
+                  <input aria-label={`${t.accounting.debit} ${i + 1}`} dir="ltr" inputMode="decimal" className="input tnum text-end" value={l.debit}
                     onChange={(e) => update(i, { debit: e.target.value.replace(/[^0-9.]/g, ""), credit: e.target.value ? "0" : l.credit })} placeholder="0.00" />
                 </td>
                 <td className="py-1.5 px-1">
-                  <input dir="ltr" inputMode="decimal" className="input tnum text-end" value={l.credit}
+                  <input aria-label={`${t.accounting.credit} ${i + 1}`} dir="ltr" inputMode="decimal" className="input tnum text-end" value={l.credit}
                     onChange={(e) => update(i, { credit: e.target.value.replace(/[^0-9.]/g, ""), debit: e.target.value ? "0" : l.debit })} placeholder="0.00" />
                 </td>
                 <td className="py-1.5 text-center">

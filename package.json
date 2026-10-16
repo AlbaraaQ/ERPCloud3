@@ -17,6 +17,7 @@
     "typecheck": "tsc --noEmit",
     "login:probe": "tsx scripts/login-probe.mts",
     "acceptance:sweep": "tsx scripts/acceptance-sweep.mts",
+    "a11y:audit": "tsx scripts/a11y-audit.mts",
     "ai:retention": "tsx scripts/ai-retention.mts",
     "backup:run": "tsx scripts/platform-backup.mts run",
     "backup:verify": "tsx scripts/platform-backup.mts verify",

@@ -75,7 +75,7 @@ export default async function LoginPage() {
               </li>
             ))}
           </ul>
-          <p className="mt-4 text-xs text-white/70">حِساب — المرحلة ١: الأساس التقني</p>
+          <p className="mt-4 text-xs text-white/90">حِساب — المرحلة ١: الأساس التقني</p>
         </div>
       </aside>
     </main>

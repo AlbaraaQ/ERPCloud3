@@ -215,7 +215,7 @@ in cannot be erased. That refusal is honoured, not worked around.
 | Gate | Result |
 |------|--------|
 | `npm run typecheck` | ✓ 0 errors |
-| `set -a && . ./.env && set +a && npm test` | ✓ **23 files / 202 passed / 8 skipped / 0 failed** |
+| `set -a && . ./.env && set +a && npm test` | ✓ **23 files / 202 passed / 8 skipped / 0 failed** (24 files / 259 after the accessibility work below) |
 | `npm run build` | ✓ compiled successfully (14.6 s), all routes emitted |
 | `npm run login:probe` | ✓ **LOGIN PROBE PASSED — 15/15** |
 | `npm run acceptance:sweep -- --soak=10` | ✓ **ACCEPTANCE SWEEP PASSED — 39/39** (soak mean 157 ms · p50 150 ms · p95 251 ms) |
@@ -224,6 +224,43 @@ in cannot be erased. That refusal is honoured, not worked around.
 > “latencies”: the dev server had been reaped mid-run. The sweep now prints that diagnosis, including
 > the first failing route, instead of twenty identical numbers — a measurement that cannot fail
 > loudly is not a measurement.
+
+### Continuation — the screen audit, done as an audit (77 violations, 0 remaining)
+
+Phase 10's remaining item was "screen-by-screen RTL/AA/colour-independence audit". An audit that is
+a promise is not an audit, so it was built twice over:
+
+- **`tests/unit/a11y-tokens.test.ts`** (57 assertions) reads `src/app/globals.css` and computes WCAG
+  contrast for every foreground/background pair the screens actually use, in **both** themes — text
+  ≥ 4.5:1, focus ring and form-control outline ≥ 3:1, plus a hue check that keeps "warning" from
+  becoming "failure" and keeps a meaning the same colour family in dark mode. Mutation-tested:
+  restoring the old ring value fails the suite at 2.49:1.
+- **`npm run a11y:audit`** walks all **28** reachable screens with a real session, parses each
+  document, and asks what a screen reader or a keyboard user would ask: language and direction, one
+  h1, no skipped heading level, a name for every control and every button/link, natural tab order,
+  nothing focusable hidden behind `aria-hidden`, a header cell in every table, unique ids, and no
+  state carried by colour alone. It prints the rule, the screen and the element, and exits non-zero.
+
+**First run: 77 violations across 9 screens.** All of them were real:
+
+| What was wrong | Why it mattered | Fix |
+|---|---|---|
+| light focus ring 2.49:1 on a white card | below the 3:1 of WCAG 1.4.11 — a keyboard user can lose the caret | `--ring` `#14b8a6` → `#0d9488` (3.36–3.74:1) |
+| `text-warning` on `bg-warning-soft` = 4.26:1 | every "expiring soon" chip, at 11 px | `--warning` `#b45309` → `#92400e` (6.02:1) |
+| a form control's outline 1.23:1 on white | the field is filled like the card behind it, so the outline **is** the control | new `--input` token, light `#7d8b99` / dark `#5a6b7f` (≥3.0 on every surface) |
+| the login hero's 12 px tagline: white/70 on teal = 3.54:1 | below 4.5:1 | white/90 (4.75:1) |
+| ~58 controls with a placeholder but no name | announced as "edit text" — the ledger grid, purchase lines, and every BOM/order/scrap form | translated `aria-label`s that carry the row number ("مدين ٣", "الكمية ٢") |
+| 2 icon-only buttons (delete line) | announced as "button" | `aria-label` + `title` from the dictionary (new `common.removeLine`) |
+| 3 tables without a header cell | a value read aloud has no column | `<th scope="row">` for the account-mapping rows, a real `<thead>` for the console's backup history |
+| /pos and an empty rep catalogue had no h1; 3 screens skipped a heading level | a screen reader's heading list is the table of contents | `sr-only` h1, a heading on the empty state, h3/h4 promoted where they were top-level |
+| the console's `Message` was a plain `<p>` | it is the single component every console form reports success or failure through, and nothing was announced | `role="alert"` (danger/warning) / `role="status"` (success) |
+
+**Last run: `A11Y AUDIT PASSED — 28 screens, no violations`.** The pre-fix run is its own control:
+the same rules reported 77 problems on the same screens.
+
+Two things the audit deliberately does **not** claim: a real screen-reader pass in Arabic, and a
+keyboard-only sweep of POS and the assistant. Both need a person and a browser; both are recorded as
+outstanding in `RELEASE_READINESS.md` §5 rather than implied to be done.
 
 ### Exact next step (Phase 10, continued)
 

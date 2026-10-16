@@ -95,7 +95,7 @@ export default function RepHome() {
             <p className="text-[10px] text-muted">{t.common.sar}</p>
           </div>
         ) : (
-          <button onClick={provision} disabled={busy} className="btn btn-primary !py-2 text-xs disabled:opacity-50">
+          <button type="button" onClick={provision} disabled={busy} className="btn btn-primary !py-2 text-xs disabled:opacity-50">
             <Zap className="h-4 w-4" /> {t.rep.provision}
           </button>
         )}

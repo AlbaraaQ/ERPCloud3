@@ -154,6 +154,15 @@ export default async function PlatformDashboard() {
         <section className="card p-4">
           <h2 className="mb-3 text-sm font-bold">{t.backupHistory}</h2>
           <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b border-border text-start text-[11px] text-muted">
+                <th className="py-2 text-start font-medium">{t.at}</th>
+                <th className="py-2 text-start font-medium">{t.backupStatus}</th>
+                <th className="py-2 text-start font-medium">{t.kind}</th>
+                <th className="py-2 text-start font-medium">{t.backupSize}</th>
+                <th className="py-2 text-start font-medium">{t.backupDrillCol}</th>
+              </tr>
+            </thead>
             <tbody>
               {runs.map((r) => (
                 <tr key={r.id} className="border-b border-border/60 last:border-0">

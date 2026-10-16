@@ -1204,6 +1204,8 @@ export const ar = {
   common: {
     save: "حفظ",
     cancel: "إلغاء",
+    removeLine: "حذف السطر",
+    description: "الوصف",
     search: "بحث",
     loading: "جارٍ التحميل…",
     empty: "لا توجد بيانات",

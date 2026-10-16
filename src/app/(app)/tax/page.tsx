@@ -108,7 +108,7 @@ export default async function TaxPage() {
           />
           {/* VAT summary */}
           <section className="card space-y-2 p-5">
-            <h3 className="font-semibold">{t.taxPg.vatSummary}</h3>
+            <h2 className="font-semibold">{t.taxPg.vatSummary}</h2>
             <div className="grid grid-cols-2 gap-3">
               <div className="rounded-xl bg-surface-2 p-4 text-center">
                 <p className="tnum text-xl font-bold" dir="ltr">{vatOf("2102").toFixed(2)}</p>

@@ -59,7 +59,7 @@ export function TaxConfigForm({
 
   return (
     <form onSubmit={onSubmit} className="card space-y-4 p-5">
-      <h3 className="font-semibold">{t.taxPg.config}</h3>
+      <h2 className="font-semibold">{t.taxPg.config}</h2>
 
       {missing.length > 0 && (
         <div className="rounded-xl bg-warning-soft px-4 py-2.5 text-xs leading-relaxed text-warning">

@@ -14,6 +14,9 @@
   --surface-3: #e7ecf1;
   --border: #e2e8ee;
   --border-strong: #c9d3dc;
+  /* Form controls are identified by their outline alone, so it must clear WCAG 1.4.11
+     (3:1) against the surface — a decorative card/table hairline does not. */
+  --input: #7d8b99;
   --foreground: #14202b;
   --muted: #5d6b7a;
   --primary: #0f766e;
@@ -22,13 +25,13 @@
   --primary-soft: #d7efec;
   --success: #047857;
   --success-soft: #d1f2e5;
-  --warning: #b45309;
+  --warning: #92400e;
   --warning-soft: #fdeacc;
   --danger: #b91c1c;
   --danger-soft: #fbdcdc;
   --info: #1d4ed8;
   --info-soft: #dbe7fe;
-  --ring: #14b8a6;
+  --ring: #0d9488;
   --shadow-color: 210 25% 12%;
 }
 
@@ -40,6 +43,7 @@
   --surface-3: #1c2632;
   --border: #232e3b;
   --border-strong: #324154;
+  --input: #5a6b7f;
   --foreground: #e8edf3;
   --muted: #94a2b3;
   --primary: #2dd4bf;
@@ -66,6 +70,7 @@
   --color-surface-3: var(--surface-3);
   --color-border: var(--border);
   --color-border-strong: var(--border-strong);
+  --color-input: var(--input);
   --color-foreground: var(--foreground);
   --color-muted: var(--muted);
   --color-primary: var(--primary);
@@ -115,7 +120,7 @@
   .input {
     width: 100%;
     border-radius: 0.75rem;
-    border: 1px solid var(--border);
+    border: 1px solid var(--input);
     background: var(--surface);
     padding: 0.625rem 0.875rem;
     font-size: 0.925rem;

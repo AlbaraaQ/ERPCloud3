@@ -65,9 +65,10 @@ npm run acceptance:sweep -- --soak=20           # expect: ACCEPTANCE SWEEP PASSE
 |---|---|---|
 | `/api/health` | `status: ok` | see §5 |
 | login transport | `npm run login:probe` → `LOGIN PROBE PASSED — 15/15` (tenant form **and** the console's enrollment → TOTP → session path) | the public origin is not allow-listed for Server Actions (`HISAB_ALLOWED_ORIGINS` / `next.config.ts`); every form will 500 in the browser while localhost looks fine |
+| screen accessibility | `npm run a11y:audit` → `A11Y AUDIT PASSED — 28 screens, no violations` | a screen lost its direction or language, a control lost its name, or a status is now signalled by colour alone |
 | `backupFreshness` | not `stale` (window 4 h by default) | `npm run backup:run` |
 | `acceptance:sweep` | 39/39 (routes + namespace isolation + soak) | the failing route names itself in the output |
-| `npm test` | 23 test files / 0 failed (authoritative run is on the pre-deploy commit) | do not deploy |
+| `npm test` | 24 test files / 0 failed (authoritative run is on the pre-deploy commit) | do not deploy |
 
 **Deployment window.** Backups and the retention sweep are the only scheduled writers; the
 maintenance job runs daily at 01:15. A restore (`platform.backup.restore`) is a maintenance-window
@@ -199,7 +200,7 @@ npm run env:setup && npm run env:check && npm run db:migrate && npm run db:seed
 
 # gates
 npm run typecheck && set -a && . ./.env && set +a && npm test && npm run build
-npm run login:probe && npm run acceptance:sweep -- --soak=20
+npm run login:probe && npm run acceptance:sweep -- --soak=20 && npm run a11y:audit
 
 # data safety
 npm run backup:run   && npm run backup:verify && npm run backup:drill

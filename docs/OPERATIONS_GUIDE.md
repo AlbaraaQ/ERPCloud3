@@ -375,6 +375,7 @@ restore drill: ✓ row_counts ✓ journal_balance (351 posted entries) ✓ tenan
 | `npm test` / `npm run test:unit` | كل الاختبارات / اختبارات الوحدة فقط |
 | `node scripts/db-reset.mjs` | إعادة بناء قاعدة التطوير بالكامل (مُدمِّر) |
 | `npx tsx scripts/seed.ts` | البيانات الأساسية والديمو |
+| `npm run a11y:audit` | يقرأ كل شاشة كما يقرأها قارئ الشاشة: الاتجاه واللغة، عنوان واحد من المستوى الأول، اسم لكل حقل وزر، ترتيب التبويب، رأس لكل جدول، وألوان لا تحمل المعنى وحدها |
 | `npm run login:probe` | إثبات عمل تسجيل الدخول من أصل المعاينة/الوسيط (وليس من localhost فقط) |
 | `npm run acceptance:sweep [-- --soak=20]` | مسح قبول شامل: كل الشاشات + عزل النطاقين + قياس زمن استجابة |
 | `npm run backup:run\|verify\|drill\|prune\|list\|status` | دورة النسخ الاحتياطي كاملة |
