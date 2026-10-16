@@ -162,6 +162,7 @@ export async function startWorker(): Promise<void> {
       const { resolveAlerts } = await import("@/modules/platform/alerts");
       const { listTenants } = await import("@/modules/platform/tenants");
       const { checkBackupFreshness } = await import("@/modules/platform/backup/service");
+      const { purgeExpiredAiConversations } = await import("@/modules/ai/retention");
       const { withTenant } = await import("@/modules/shared/db-context");
 
       await dropOrphanDrillSchemas();
@@ -178,9 +179,26 @@ export async function startWorker(): Promise<void> {
           logger.warn({ err, tenant: tenant.id }, "usage capture failed"),
         );
       }
+      // AI conversation retention (AI_ASSISTANT §5/§7): expired threads go, the
+      // tool-call/injection audit and every approval ticket stay. Read-only tenants
+      // are reported, not swept — suspension preserves history by design.
+      const retention = await purgeExpiredAiConversations();
       await checkBackupFreshness();
       const cleared = await resolveAlerts("worker_heartbeat_stale", null);
-      logger.info({ limits, expired, tenants: tenants.length, cleared }, "platform maintenance done");
+      logger.info(
+        {
+          limits,
+          expired,
+          tenants: tenants.length,
+          cleared,
+          aiRetention: {
+            swept: retention.length,
+            conversations: retention.reduce((a, r) => a + r.conversations, 0),
+            skipped: retention.filter((r) => r.skippedReason).length,
+          },
+        },
+        "platform maintenance done",
+      );
     });
     await boss.schedule(PLATFORM_MAINTENANCE_QUEUE, "15 1 * * *", {});
 

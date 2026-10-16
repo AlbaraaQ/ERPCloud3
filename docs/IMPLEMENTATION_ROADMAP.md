@@ -132,8 +132,13 @@ recording, cross-tenant args rejected as invalid); the model cannot mutate state
 (ticket state machine + `errors.permissionDenied` for a non-holder + executed-only-once); provider config
 isolated from the core ✅ (adapters behind one interface, no vendor SDK, scripted provider in tests).
 
-**Not done here (Phase 10):** retention purge job, streaming answers, document ingestion, provider-terms
-text, token metering.
+**Closed after this line was written (Phase 9 residuals, Session 12):** the retention purge job
+(`modules/ai/retention.ts`, run by the daily `platform-maintenance` job or `npm run ai:retention`)
+and token metering into `usage_metrics` (additive counters, counts only, shown as a counts-only
+card in the platform console).
+
+**Not done here (Phase 10):** streaming answers, document ingestion, provider-terms text,
+cost/billing computation.
 
 ## Phase 10 — UX completion, hardening & release readiness
 

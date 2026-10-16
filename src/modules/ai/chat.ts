@@ -39,6 +39,7 @@ import {
   type ToolSpec,
 } from "./providers";
 import { businessToday, runTool, toolSpecsForSession, zodToJsonSchema, type ToolContext } from "./tools";
+import { recordAiUsage } from "./usage";
 
 export const MAX_ROUNDS = 3;
 export const MAX_TOOL_CALLS_PER_TURN = 6;
@@ -708,6 +709,17 @@ export async function askAssistant(
       answer = messageFor(session.locale, answerKey);
     }
   }
+
+  // Counters for the platform console: how much the assistant is used, never what
+  // it was asked or answered (AI_ASSISTANT §7). Metering cannot fail the answer.
+  await recordAiUsage(session.tenantId, {
+    turns: rounds > 0 ? 1 : 0,
+    tokensIn,
+    tokensOut,
+    toolCalls: usedTools.length,
+    refusals: usedTools.filter((tool) => !tool.ok).length,
+    injectionFlags,
+  });
 
   return {
     ok: Boolean(answer) && !answerKey,

@@ -4,6 +4,92 @@
 append-only per session, **newest first**; keep them factual — commands and results
 exactly as observed.
 
+## Session 12 — 2026-10-16 · Phase 9 residuals closed (retention purge job + token metering) → Phase 10 started
+
+### Status: both Phase 9 residuals implemented ✅ · 3 new integration tests · gate green (`npm test` 20 files / 173 passed / 8 skipped / 0 failed · `tsc` clean) · Phase 10 (UX completion, hardening & release readiness) next
+
+> **Honesty notes.** (1) No provider is called here either — the metering test drives the
+> assistant through the injected scripted provider, and the dev tenant's `ASSISTANT_API_KEY`
+> remains a placeholder. The counters below are therefore *real* counters over *scripted*
+> turns: they prove that usage is recorded once per turn, per tenant, per month, and that it is
+> **counts only** — they do not claim live token billing. (2) The retention sweep is exercised
+> against the dev database with an aged thread created by the test itself; the numbers below
+> come from that run, not from a production corpus. (3) `npm run ai:retention -- --dry-run` is
+> read-only: it reports what a sweep *would* remove and removes nothing.
+
+### Work completed
+
+- **`modules/ai/usage.ts` — counts-only metering.** `AI_METRICS = ai_turns | ai_tokens_in |
+  ai_tokens_out | ai_tool_calls | ai_refusals | ai_injection_flags`; the upsert is **additive**
+  (`value + n::numeric`), so a second turn in the same month no longer rewrites a whole period
+  (the platform helper `recordUsage` *assigns* a snapshot — the right thing for plan/quota
+  metrics, the wrong thing for counters). `recordAiUsage(tenantId, sample)` stores **numbers
+  only**: no question, no answer, no amounts. It is wrapped in `try/catch` + `warn`: a metering
+  failure must never turn into a failed answer.
+- **`chat.ts` records exactly one sample per completed turn** (turns/tokens/tool calls/refusals/
+  injection flags), taken from the turn's own tallies.
+- **`modules/ai/retention.ts` — tenant-safe purge.** Age key is
+  `coalesce(last_message_at, created_at) < now - retentionDays`; messages cascade with their
+  thread while `ai_tool_calls`, `ai_injection_flags` (reference set to NULL) and
+  **`ai_approval_tickets` (untouched)** survive — a ticket records a human decision that may
+  have produced an accounting document, and retention of chat text is not a licence to forget
+  it. Each tenant sweep writes `ai.retention.purged` with the counts, the window and the cutoff
+  in the *tenant's own* chain. A non-writable tenant is detected **before** the sweep and
+  reported as `skippedReason: errors.tenantReadOnly`, never as an honest-looking "0 expired".
+  `purgeExpiredAiConversations()` drives the sweep from `selectDistinct(tenant_id) from
+  ai_conversations`, so a deployment where nobody asks anything visits nothing.
+- **Scheduling:** the sweep runs inside the existing `platform-maintenance` queue (daily 01:15),
+  before `checkBackupFreshness`, and logs `aiRetention {swept, conversations, skipped}`.
+  On demand: `npm run ai:retention [-- --dry-run]` (`scripts/ai-retention.mts`).
+- **Platform console:** the tenant detail page gained an **AI usage** card (turns, tokens in/out,
+  tool calls, refusals, injection attempts) fed by `aiUsageSnapshot(tenantId, month)` with the
+  explicit note that it shows aggregated counts for the current month only.
+- **Assistant screen (Phase 10 accessibility pass, started):** the transcript is a `role="log"`
+  with `aria-live="polite"` / `aria-busy`, the unavailable and notice banners carry
+  `role="status"` (errors `role="alert"`), the composer has an `aria-label`, and the
+  scope/retention badge now shows localized words ("أرقام مجمّعة وأسماء مقنّعة · 30 يوم") with
+  the full description in `title` instead of raw identifiers (`metrics_only`) in the UI.
+
+### Commands executed → results
+
+| Command | Result |
+|---------|--------|
+| `npm run ai:retention -- --dry-run` | tenant `01a141ee-5e7e-749c-b3e7-f52d51781af3` · retentionDays **30** · cutoff `2026-09-16T00:08:59.740Z` · 0 conversations / 0 messages · "approval tickets retained: 1" |
+| `npm run typecheck` | ✓ exit 0 (after the i18n keys landed; see defect 6) |
+| `set -a && . ./.env && set +a && npx vitest run tests/integration/ai-assistant.test.ts` | ✓ **17 tests passed** (14 + 3 new: metering, purge, read-only skip) |
+| `set -a && . ./.env && set +a && npm test` | ✓ **20 files / 173 passed / 8 skipped / 0 failed** (was 170 passed) |
+| live curl `/assistant` (tenant session, dev server :3000) | 200 · `role="log"`, `aria-live="polite"`, `aria-busy="false"`, badge "أرقام مجمّعة وأسماء مقنّعة · 30 يوم" |
+| live curl `/platform/tenants/01a141ee-…` (platform session) | 200 · AI-usage card renders: heading «استخدام المساعد الذكي (أعداد فقط)», rows عدد الأسئلة / توكنات الإدخال / محاولات توجيه مشبوهة + the counts-only note |
+
+### Defects found and fixed while doing this (with the lasting rules they produced)
+
+| # | Defect | Effect if shipped | Rule |
+|---|--------|-------------------|------|
+| 6 | the i18n patch script asserted on the *wrong* anchor (`"الحدود والاستخدام"` instead of the real `quotas: "الحصص والاستخدام"`) | the seven platform keys were never written while the page already used them → `tsc` red with 5 × `TS2339` | grep the anchor before scripting a dictionary edit; a dictionary patch that fails must fail **loudly** — it did, and the tree was never committed red |
+| 7 | the new screen props were declared in **both** the label interface and the component's `Props` | duplicate (harmless but misleading) interface members | one home per label: the label bag owns the wording, the component owns the data |
+| 8 | (design) a read-only tenant would have been reported as "0 conversations expired" | a purge that did not run would have looked like a purge that found nothing | *skipped* and *empty* are different facts and must print differently |
+
+### Residuals (updated)
+
+1. **No live provider exchange anywhere** — unchanged (scripted provider; placeholder key).
+2. No streaming answers, no document/attachment ingestion, no per-tenant provider-terms text.
+3. Asking is still open to any tenant user; the boundaries remain the tool permissions and the
+   intent permission (a dedicated `ai.use` code was deliberately not introduced).
+4. Metering is **counts only** — no cost/billing computation, by design (a price per token would
+   be a commercial assumption this build does not own).
+5. Retention applies to `ai_conversations` only, by design (audit tables, tickets and the
+   platform chain are out of its scope and are proven to survive).
+
+### Exact next step (Phase 10 — UX completion, hardening & release readiness)
+
+1. RTL/bilingual + accessibility + status-semantics sweep over the remaining screens.
+2. Re-run the full acceptance list of `TESTING_AND_ACCEPTANCE.md`; re-drill the restore.
+3. Deployment & rollback runbook + operational runbooks; release-readiness report with evidence.
+4. **Deliverable requested by the user:** `docs/OPERATIONS_GUIDE.md` — how to run and use the
+   system (Arabic).
+
+---
+
 ## Session 11 — 2026-10-16 · Phase 9 (AI assistant) implemented — chat, permission-gated tools, approval tickets, audit
 
 ### Status: Phase 9 implemented ✅ · 5 defects found and fixed · 6 documented residuals · Phase 10 (UX completion & release readiness) next

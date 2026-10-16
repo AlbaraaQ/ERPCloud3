@@ -67,7 +67,7 @@ report services — never re-implements figures), output limits (row caps, field
 |--------|----------|
 | Scope "metrics only" (default) | aggregates/numbers + masked names (C-1042 style) where names aren't needed |
 | Scope "names allowed" | customer/product names included when the question needs them |
-| Retention | conversations purged after N days (default 30); tool-call audit kept per audit policy w/o full payloads |
+| Retention | conversations purged after N days (default 30) — implemented, see §9; tool-call audit kept per audit policy w/o full payloads |
 | Region/provider | per-tenant documented choice; no training-opt-in APIs assumed — provider terms summarized in config UI |
 | Hard exclusions | passwords, secrets, other tenants, raw ledger exports, free-text attachments |
 
@@ -102,11 +102,27 @@ see PROGRESS Session 11 for the evidence and the five defects the suites found):
 | UI | `/assistant`, `/assistant/settings` | chat + tool chips + ticket cards; settings behind `settings.company.manage`, key entered as an env-var name |
 | Audit | `ai_conversations`, `ai_messages`, `ai_tool_calls`, `ai_injection_flags`, `ai_approval_tickets` | refusals, escalations, injection hits and ticket ids are all recorded; the transcript keeps tool *names*, not payloads |
 
-**Limits in this environment (do not read more into the green tests than this):** no provider is
+**Retention and metering were the two open residuals of Phase 9 and are now built** (§9);
+everything else in that list still stands. **Limits in this environment (do not read more into the
+green tests than this):** no provider is
 called — every turn runs against an injected scripted provider, and the dev tenant's key is a
 placeholder; the model's *answers* are therefore never judged for quality here, only the
-boundaries around them. Not implemented yet: retention purge job (`retentionDays` is stored and
-displayed only), streaming, document/attachment ingestion, per-tenant provider-terms text,
-token metering into `usage_metrics`. Answers are plain text (no markdown renderer), `MAX_ROUNDS`
+boundaries around them. Still not implemented: streaming, document/attachment ingestion, per-tenant
+provider-terms text, cost/billing computation (metering is counts only, §9). Answers are plain text (no markdown renderer), `MAX_ROUNDS`
 = 3 and `MAX_TOOL_CALLS_PER_TURN` = 6 are hard caps, and asking is open to any tenant user —
 the tool permissions and the ticket permission are the boundaries, not a separate `ai.use` code.
+
+## 9. Retention & metering (Phase 9 residuals — built)
+
+| Piece | Where | Behavior |
+|---|---|---|
+| Retention sweep | `modules/ai/retention.ts` | Age key `coalesce(last_message_at, created_at) < now − retentionDays` (default 30). Deletes **conversations only**; messages cascade, `ai_tool_calls`/`ai_injection_flags` survive with a NULL reference, **`ai_approval_tickets` are never touched**. Each sweep audits `ai.retention.purged` (counts, window, cutoff) in the tenant's own chain. A read-only (suspended/deactivated) tenant is reported as `skippedReason: errors.tenantReadOnly` **before** any work — a purge that did not run must never print as "0 expired". |
+| Scheduling | `modules/jobs/worker.ts` | Runs inside the existing `platform-maintenance` queue (daily 01:15) before the backup-freshness check; logs `aiRetention {swept, conversations, skipped}`. Driven from `selectDistinct(tenant_id) from ai_conversations`, so an unused deployment visits nothing. |
+| On demand | `npm run ai:retention [-- --dry-run]` (`scripts/ai-retention.mts`) | `--dry-run` reports what *would* be removed (threads/messages per tenant, retained ticket count) and removes nothing. |
+| Metering | `modules/ai/usage.ts` + one call per turn in `chat.ts` | Six additive counters in `usage_metrics`: `ai_turns`, `ai_tokens_in`, `ai_tokens_out`, `ai_tool_calls`, `ai_refusals`, `ai_injection_flags`, per tenant per month. **Counts only** — no question, answer or amount is stored, and metering failures are caught and logged, never allowed to fail an answer. |
+| Console view | `platform/(console)/tenants/[id]` | "AI assistant usage (counts only)" card for the current month. No tenant content, ever (PLATFORM_ADMIN §3). |
+
+**Why the upsert is additive:** the platform helper `recordUsage` *assigns* a snapshot
+(`value = n`), which is correct for plan/quota metrics and wrong for counters — a second turn in
+the same month would have replaced the month's totals with one turn's numbers. Token/call
+counters therefore use `value + n::numeric`.

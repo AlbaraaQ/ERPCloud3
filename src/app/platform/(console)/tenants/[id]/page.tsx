@@ -14,6 +14,7 @@ import { auditLog, deletionRequests, plans as plansTable } from "@/db/schema";
 import { getLocale, getDict } from "@/i18n";
 import { requirePlatformPermission, getPlatformContext } from "@/modules/platform/context";
 import { tenantOverview } from "@/modules/platform/tenants";
+import { aiUsageSnapshot } from "@/modules/ai/usage";
 import { listGrants } from "@/modules/platform/grants";
 import { listExports } from "@/modules/platform/exports";
 import {
@@ -41,6 +42,10 @@ export default async function TenantDetailPage({ params }: { params: Promise<{ i
 
   const overview = await tenantOverview(id).catch(() => null);
   if (!overview) notFound();
+
+  // Assistant counters are COUNTS ONLY (turns, tokens, tool calls) — the console
+  // never sees a question or an answer (AI_ASSISTANT §7, PLATFORM_ADMIN §3).
+  const aiUsage = await aiUsageSnapshot(id).catch(() => null);
 
   const [planRows, grants, exports, deletions, tenantAudit] = await Promise.all([
     db.select().from(plansTable).orderBy(plansTable.sortOrder),
@@ -111,6 +116,19 @@ export default async function TenantDetailPage({ params }: { params: Promise<{ i
             <Row label={t.customers} value={String(counts.customers)} />
             <Row label={t.lastPosting} value={fmtDate(activity.lastPosting)} />
           </dl>
+        </section>
+
+        <section className="card p-4">
+          <h2 className="mb-3 text-sm font-bold">{t.aiUsage}</h2>
+          <dl className="space-y-1 text-xs">
+            <Row label={t.aiTurns} value={String(aiUsage?.ai_turns ?? 0)} />
+            <Row label={t.aiTokensIn} value={String(aiUsage?.ai_tokens_in ?? 0)} />
+            <Row label={t.aiTokensOut} value={String(aiUsage?.ai_tokens_out ?? 0)} />
+            <Row label={t.aiToolCalls} value={String(aiUsage?.ai_tool_calls ?? 0)} />
+            <Row label={t.aiRefusals} value={String(aiUsage?.ai_refusals ?? 0)} />
+            <Row label={t.aiInjectionFlags} value={String(aiUsage?.ai_injection_flags ?? 0)} />
+          </dl>
+          <p className="mt-3 text-[11px] text-muted">{t.aiUsageHint}</p>
         </section>
 
         <section className="card p-4">

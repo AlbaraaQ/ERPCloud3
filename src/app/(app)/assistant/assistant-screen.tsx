@@ -54,6 +54,11 @@ interface AiLabels {
   resultExecuted: string;
   settingsTitle: string;
   noAccess: string;
+  scopeMasked: string;
+  scopeNames: string;
+  daysShort: string;
+  dataScopeMetrics: string;
+  dataScopeNames: string;
 }
 
 interface UsedToolView {
@@ -329,8 +334,12 @@ export function AssistantScreen(props: Props) {
               {props.model}
             </span>
           ) : null}
-          <span className="rounded-md bg-surface-3 px-2 py-1 text-[11px] text-muted">
-            {props.dataScope === "names_allowed" ? "names_allowed" : "metrics_only"} · {props.retentionDays}d
+          <span
+            className="rounded-md bg-surface-3 px-2 py-1 text-[11px] text-muted"
+            title={props.dataScope === "names_allowed" ? t.dataScopeNames : t.dataScopeMetrics}
+          >
+            {props.dataScope === "names_allowed" ? t.scopeNames : t.scopeMasked} · {props.retentionDays}{" "}
+            {t.daysShort}
           </span>
           {props.canSeeSettings ? (
             <Link href="/assistant/settings" className="btn btn-ghost">
@@ -341,7 +350,7 @@ export function AssistantScreen(props: Props) {
       </header>
 
       {!props.available ? (
-        <section className="card border-warning/40 p-4">
+        <section className="card border-warning/40 p-4" role="status">
           <h2 className="flex items-center gap-2 text-sm font-bold text-warning">
             <AlertTriangle className="h-4 w-4" aria-hidden />
             {t.unavailableTitle}
@@ -352,14 +361,23 @@ export function AssistantScreen(props: Props) {
       ) : null}
 
       {notice ? (
-        <p className={`card p-3 text-sm ${notice.ok ? "border-success/40 text-success" : "border-danger/40 text-danger"}`}>
+        <p
+          role={notice.ok ? "status" : "alert"}
+          className={`card p-3 text-sm ${notice.ok ? "border-success/40 text-success" : "border-danger/40 text-danger"}`}
+        >
           {notice.text}
         </p>
       ) : null}
 
       <div className="grid gap-6 lg:grid-cols-[1fr_22rem]">
         <section className="card flex min-h-[60vh] flex-col p-4">
-          <div className="flex-1 space-y-4 overflow-y-auto pe-1">
+          <div
+            className="flex-1 space-y-4 overflow-y-auto pe-1"
+            role="log"
+            aria-live="polite"
+            aria-busy={pending}
+            aria-label={t.title}
+          >
             {messages.length === 0 ? <p className="text-sm text-muted">{t.empty}</p> : null}
             {messages.map((m) => (
               <div key={m.id} className={m.role === "user" ? "text-end" : ""}>
@@ -408,13 +426,18 @@ export function AssistantScreen(props: Props) {
                 ))}
               </div>
             ))}
-            {pending ? <p className="text-sm text-muted">{t.thinking}</p> : null}
+            {pending ? (
+              <p className="text-sm text-muted" role="status">
+                {t.thinking}
+              </p>
+            ) : null}
           </div>
 
           <div className="mt-4 flex items-end gap-2 border-t border-border pt-4">
             <textarea
               className="input min-h-[2.75rem] flex-1 resize-y"
               rows={2}
+              aria-label={t.placeholder}
               placeholder={t.placeholder}
               value={draft}
               disabled={!props.available || pending}

@@ -15,6 +15,7 @@
     "backup:drill": "tsx scripts/platform-backup.mts drill",
     "backup:prune": "tsx scripts/platform-backup.mts prune",
     "backup:list": "tsx scripts/platform-backup.mts list",
+    "ai:retention": "tsx scripts/ai-retention.mts",
     "backup:status": "tsx scripts/platform-backup.mts status"
   },
   "dependencies": {

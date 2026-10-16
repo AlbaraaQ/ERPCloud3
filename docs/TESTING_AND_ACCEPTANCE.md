@@ -246,7 +246,8 @@ reason, and never reported as passing.
 ### 3.4 Phase 9 — AI assistant (FR-090…, D-019)
 
 **Executed evidence** (`tests/unit/ai-assistant.test.ts` 12 tests,
-`tests/integration/ai-assistant.test.ts` 14 tests; full gate `npm test` **20 files / 170 passed /
+`tests/integration/ai-assistant.test.ts` 14 tests — **17 after Session 12 added the retention and
+metering cases, see 3.4.1**; full gate `npm test` **20 files / 173 passed /
 8 skipped / 0 failed**; `tsc` clean; `next build` ok; `/assistant` + `/assistant/settings` 200 over
 HTTP with a live tenant session):
 
@@ -286,8 +287,8 @@ HTTP with a live tenant session):
 **Environment limits (AC-025 §2 style):** no provider is called — turns run against an injected
 scripted provider, so answer *quality* is not judged here at all; the provider wire formats are
 covered by the adapters' shape and by the round-trip fix (assistant turns carry their tool-call
-blocks). Retention is stored but no purge job exists yet, so the retention test asserts the *survival*
-of the audit, not a purge run.
+blocks). Retention *now runs* (3.4.1) and is exercised against threads the test ages itself; the
+counters it verifies are real counters over scripted turns, not billed traffic.
 
 **Defects found and fixed while driving these suites** (details in PROGRESS Session 11):
 
@@ -298,6 +299,33 @@ of the audit, not a purge run.
 | 3 | `wrapUntrusted` did not neutralize its own close marker inside content | a memo could close the untrusted block early and read as system text |
 | 4 | both provider adapters dropped assistant tool-call blocks | second round was an invalid conversation for OpenAI/Anthropic |
 | 5 | `tenancy.rls.test.ts` hard-coded `database app_db` | suite failed on any server whose database is named otherwise |
+
+### 3.4.1 Phase 9 residuals closed (Session 12) — retention purge + usage metering
+
+**Executed evidence** (`tests/integration/ai-assistant.test.ts` 3 new tests → **17 passed**;
+full gate `npm test` **20 files / 173 passed / 8 skipped / 0 failed**; `tsc` clean; live curl of
+`/assistant` and of the platform tenant page):
+
+1. **Metering is per tenant, per month, additive and contentless.** After one scripted turn the
+   tenant's counters advance by exactly one turn / 24 input tokens / 14 output tokens / 1 tool
+   call *relative to their previous values* (the assertion is a delta — the suite must not depend
+   on a fresh database), every `ai_*` row carries the current month, and the joined value of the
+   rows does **not** contain the question text: the platform side sees counts, never content.
+2. **The purge removes conversations, not evidence.** A thread with one tool call and one
+   approval ticket is aged 90/95 days, then swept: conversations and messages are gone, the tool
+   call survives with `conversation_id = NULL`, the ticket keeps its intent and status, the
+   tenant's own chain carries `ai.retention.purged` with `{retentionDays: 30, …}`, and a **second
+   sweep is idempotent** (0 conversations). Tickets are never swept — the promise in §5 of
+   `AI_ASSISTANT.md` is asserted, not just written.
+3. **A suspended tenant is skipped, not reported as empty.** With the tenant `suspended`, the
+   sweep returns `conversations: 0` **and** `skippedReason: errors.tenantReadOnly`, and the aged
+   thread is still there (suspension preserves history); after the tenant is resumed the same
+   sweep removes exactly that thread. The test restores the tenant status in a `finally` — a
+   suite that leaves a tenant suspended corrupts every later test.
+4. **The purge is reachable outside the app.** `npm run ai:retention -- --dry-run` reported the
+   live tenant, `retentionDays 30`, cutoff `2026-09-16T00:08:59.740Z`, 0 conversations /
+   0 messages and "approval tickets retained: 1" — a dry run that prints a cutoff without deleting
+   anything.
 
 ## 4. Security & concurrency suites
 

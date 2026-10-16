@@ -52,6 +52,8 @@ describe.skipIf(!DB)("ai assistant — permissions, tickets, audit", () => {
   let guardrails: typeof import("@/modules/ai/guardrails");
   let toolsMod: typeof import("@/modules/ai/tools");
   let dates: typeof import("@/modules/shared/dates");
+  let usageMod: typeof import("@/modules/ai/usage");
+  let retentionMod: typeof import("@/modules/ai/retention");
 
   let tenantId = "";
   let otherTenantId = "";
@@ -119,6 +121,8 @@ describe.skipIf(!DB)("ai assistant — permissions, tickets, audit", () => {
     guardrails = await import("@/modules/ai/guardrails");
     toolsMod = await import("@/modules/ai/tools");
     dates = await import("@/modules/shared/dates");
+    usageMod = await import("@/modules/ai/usage");
+    retentionMod = await import("@/modules/ai/retention");
 
     const { plans, products, warehouses } = await import("@/db/schema");
     if ((await db.select().from(plans)).length === 0) {
@@ -745,6 +749,150 @@ describe.skipIf(!DB)("ai assistant — permissions, tickets, audit", () => {
     await tenantsMod.setTenantStatus({ tenantId, to: "active", reason: "resume after test", actorLabel: "vitest" });
     const resumed = await configMod.aiAvailability(tenantId);
     expect(resumed.available).toBe(true);
+  });
+
+  it("meters usage as counts only, per tenant month", async () => {
+    const before = await usageMod.aiUsageSnapshot(tenantId);
+    const result = await chat.askAssistant(
+      { session: session(ownerPerms, ownerId), message: "ملخص سريع للمبيعات" },
+      {
+        provider: fakeProvider([
+          { text: "", toolCalls: [{ id: "u1", name: "sales_today", args: {} }] },
+          { text: "تم.", toolCalls: [] },
+        ]),
+      },
+    );
+    expect(result.ok).toBe(true);
+
+    const after = await usageMod.aiUsageSnapshot(tenantId);
+    expect(after.ai_turns).toBe(before.ai_turns + 1);
+    expect(after.ai_tokens_in).toBe(before.ai_tokens_in + 24); // 12 per round × 2
+    expect(after.ai_tokens_out).toBe(before.ai_tokens_out + 14);
+    expect(after.ai_tool_calls).toBe(before.ai_tool_calls + 1);
+
+    // counts, and nothing else: the question text must not reach the platform side
+    const samples = await rows<{ metric: string; value: string; period: string }>(
+      `select metric, value, period from usage_metrics where tenant_id = $1::uuid and metric like 'ai_%' order by metric`,
+      [tenantId],
+    );
+    expect(samples.length).toBeGreaterThan(0);
+    expect(samples.every((s) => s.period === dates.todayBusinessDate().slice(0, 7))).toBe(true);
+    expect(JSON.stringify(samples)).not.toContain("ملخص سريع للمبيعات");
+  });
+
+  it("purges expired conversations but keeps the audit and every approval ticket", async () => {
+    // a thread that is older than the tenant's window, with a tool call and a ticket
+    const oldSession = await chat.askAssistant(
+      { session: session(ownerPerms, ownerId), message: "سؤال قديم" },
+      {
+        provider: fakeProvider([
+          { text: "", toolCalls: [{ id: "r1", name: "sales_today", args: {} }] },
+          {
+            text: "طلب قديم",
+            toolCalls: [
+              {
+                id: "r2",
+                name: chat.PROPOSE_ACTION,
+                args: {
+                  intent: "journal_entry_draft",
+                  summary: "قيد قديم للاختبار",
+                  payload: {
+                    businessDate: dates.todayBusinessDate(),
+                    memo: "قيد قديم للاختبار",
+                    lines: [
+                      { accountId: accountA, debit: 10 },
+                      { accountId: accountB, credit: 10 },
+                    ],
+                  },
+                },
+              },
+            ],
+          },
+          { text: "انتهى.", toolCalls: [] },
+        ]),
+      },
+    );
+    const oldConversationId = oldSession.conversationId!;
+    const ticketId = oldSession.tickets[0]?.id ?? "";
+    expect(ticketId).toBeTruthy();
+
+    // age the thread past the retention window (30 days by configuration)
+    await db.execute(
+      sql`update ai_conversations set last_message_at = now() - interval '90 days', created_at = now() - interval '95 days'
+           where id = ${oldConversationId}::uuid`,
+    );
+
+    const duringSuspension = await configMod.getAiConfig(tenantId);
+    expect(duringSuspension.retentionDays).toBe(30);
+
+    const results = await retentionMod.purgeExpiredAiConversations();
+    const mine = results.find((r) => r.tenantId === tenantId);
+    expect(mine, "the sweep must visit this tenant").toBeTruthy();
+    expect(mine!.conversations).toBeGreaterThanOrEqual(1);
+    expect(mine!.messages).toBeGreaterThanOrEqual(2);
+    expect(mine!.ticketsDetached).toBeGreaterThanOrEqual(1);
+
+    // the thread is gone …
+    expect(
+      await rows(`select id from ai_conversations where id = $1::uuid`, [oldConversationId]),
+    ).toHaveLength(0);
+    // … its messages are gone with it …
+    expect(
+      await rows(`select id from ai_messages where conversation_id = $1::uuid`, [oldConversationId]),
+    ).toHaveLength(0);
+    // … but the tool call survives, only detached from the deleted thread
+    const [call] = await rows<{ conversation_id: string | null }>(
+      `select conversation_id from ai_tool_calls where tenant_id = $1::uuid and conversation_id is null limit 1`,
+      [tenantId],
+    );
+    expect(call.conversation_id).toBeNull();
+    // … and the ticket keeps every field that matters
+    const [ticket] = await rows<{ status: string; intent: string; conversation_id: string | null }>(
+      `select status, intent, conversation_id from ai_approval_tickets where id = $1::uuid`,
+      [ticketId],
+    );
+    expect(ticket.intent).toBe("journal_entry_draft");
+    expect(ticket.conversation_id).toBeNull();
+
+    // the purge is audited in the tenant's own chain, with the counts and the window
+    const [audit] = await rows<{ action: string; after: Record<string, unknown> }>(
+      `select action, after from audit_log where tenant_id = $1::uuid and action = 'ai.retention.purged' order by at desc limit 1`,
+      [tenantId],
+    );
+    expect(audit.action).toBe("ai.retention.purged");
+    expect(audit.after).toMatchObject({ retentionDays: 30 });
+
+    // a second sweep finds nothing: the operation is idempotent
+    const again = (await retentionMod.purgeExpiredAiConversations()).find((r) => r.tenantId === tenantId);
+    expect(again?.conversations ?? 0).toBe(0);
+  });
+
+  it("does not sweep a read-only tenant (suspension preserves history)", async () => {
+    const fresh = await chat.askAssistant(
+      { session: session(ownerPerms, ownerId), message: "سؤال قبل الإيقاف" },
+      { provider: fakeProvider([{ text: "حسناً.", toolCalls: [] }]) },
+    );
+    await db.execute(
+      sql`update ai_conversations set last_message_at = now() - interval '400 days', created_at = now() - interval '400 days'
+           where id = ${fresh.conversationId}::uuid`,
+    );
+
+    await tenantsMod.setTenantStatus({ tenantId, to: "suspended", reason: "retention test", actorLabel: "vitest" });
+    try {
+      const suspended = await retentionMod.purgeAiConversations(tenantId);
+      expect(suspended.conversations).toBe(0);
+      expect(suspended.skippedReason).toBe("errors.tenantReadOnly");
+      expect(
+        await rows(`select id from ai_conversations where id = $1::uuid`, [fresh.conversationId]),
+      ).toHaveLength(1);
+    } finally {
+      // never leave the tenant suspended for the rest of the suite
+      await tenantsMod.setTenantStatus({ tenantId, to: "active", reason: "resume after retention test", actorLabel: "vitest" });
+    }
+
+    const resumed = await retentionMod.purgeAiConversations(tenantId);
+    expect(resumed.conversations).toBe(1);
+    expect(resumed.messages).toBeGreaterThanOrEqual(2);
   });
 
   it("keeps the assistant's audit trail outlived by the transcript cleanup it promises", async () => {
