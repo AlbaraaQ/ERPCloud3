@@ -303,7 +303,9 @@ counters it verifies are real counters over scripted turns, not billed traffic.
 ### 3.4.1 Phase 9 residuals closed (Session 12) — retention purge + usage metering
 
 **Executed evidence** (`tests/integration/ai-assistant.test.ts` 3 new tests → **17 passed**;
-full gate `npm test` **20 files / 173 passed / 8 skipped / 0 failed**; `tsc` clean; live curl of
+full gate `npm test` **20 files / 173 passed / 8 skipped / 0 failed** at the time of that run —
+later sessions added suites, so treat `PROGRESS.md` / `RELEASE_READINESS.md` as the current
+totals and this line as the evidence of the run described here; `tsc` clean; live curl of
 `/assistant` and of the platform tenant page):
 
 1. **Metering is per tenant, per month, additive and contentless.** After one scripted turn the

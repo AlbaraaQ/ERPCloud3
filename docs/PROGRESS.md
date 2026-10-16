@@ -124,6 +124,59 @@ exactly as observed.
 E2E and AA coverage, deployment automation) rather than unfinished product features — see
 `RELEASE_READINESS.md` §5.
 
+### Continuation — the sandbox rebooted; the environment was rebuilt from the template
+
+**What happened.** The workspace snapshot does not carry `node_modules/`, the embedded database
+directory `.pglite/`, or the gitignored `.env` (never a credential file in a snapshot). After the
+restart the tree was source-complete and unrunnable, which is exactly the state a new operator
+starts from.
+
+**Defect found while recovering (the user's report, and it was real):** `OPERATIONS_GUIDE.md` told
+the reader to run `cp .env.example .env`, and **there was no `.env.example`**. The first instruction
+of the guide could not be executed. Fixed by writing the template (grouped, Arabic+English, no
+secret values, `.env` left untracked and the template explicitly un-ignored) and by locking it with
+`tests/unit/env-example.test.ts`:
+
+| Assertion | Why |
+|---|---|
+| every `process.env.*` read by `src/` or `scripts/` is declared (`FRAMEWORK_VARS` allow-lists only `NODE_ENV`/`NEXT_RUNTIME`/`USER`) | the template can never silently drift behind the code |
+| every variable in the guide's §1.5 table is declared | documentation promises a settable variable; the promise is checkable |
+| if the guide says `cp .env.example .env`, the file exists and is non-trivial | the exact defect above cannot come back |
+| secrets are present but **empty** (`HISAB_ENCRYPTION_KEY`, seed passwords, assistant key, Drive secret/token) | a template must not ship a working credential |
+| `HISAB_ALLOW_LIVE_RESTORE` is absent by default | live restore is an announced-window operation |
+| `.gitignore` contains `!.env.example` | the template survives the `.env` ignore rule |
+
+Both directions were mutation-tested: deleting `PG_POOL_MAX` failed the completeness assertions, and
+filling `HISAB_ENCRYPTION_KEY` failed the safety assertions; the file was restored and the suite is
+green again.
+
+**Second surprise, same reboot: the checkout was re-cloned at the branch's *base* commit.** A fresh
+clone had `HEAD = a52a1f0` (the branch point) with an index to match, while the working tree held the
+real source, so `git status` looked like a project mid-rewrite (dozens of "modified" and "untracked"
+files that were in fact already committed). Nothing was lost: the branch tip was intact on the
+remote. Recovery was `git fetch origin arena/60f797f0-erpcloud3` → `git reset --mixed <tip>`, after
+which the tree showed exactly this session's work and nothing else. **Lesson recorded:** after any
+sandbox restart, verify `git log -1` against the remote **before** staging anything — a stale HEAD
+plus `git add -A` is how a session accidentally deletes a phase.
+
+**Recovery executed, using the guide's own instructions (no ad-hoc path):**
+
+| Step | Command | Result |
+|------|---------|--------|
+| dependencies | `npm install --no-audit --no-fund` | 480 packages |
+| environment | `cp .env.example .env` + filled 4 lines (key generated with the command printed in the template) | 9 active variables |
+| engine | `node scripts/dev-postgres.mjs --dir .pglite` | PostgreSQL 18.6 (PGlite) on 127.0.0.1:5432 |
+| schema + RLS + seed | `node scripts/db-reset.mjs` | 52 permission codes · platform owner · two demo tenants (tenant A id `01a1422b-a19c-7f39-8261-08cf41f0253f`) |
+| types | `npm run typecheck` | ✓ 0 errors |
+| suite | `set -a && . ./.env && set +a && npm test` | ✓ **22 files / 192 passed / 8 skipped / 0 failed** |
+| acceptance | `npm run acceptance:sweep -- --soak=20` | ✓ **39/39 checks** · soak mean 192 ms / p50 186 ms / p95 406 ms |
+| data safety | `npm run backup:run` · `verify` · `drill` | artifact sha `fbfbb66cd0da63d7…` · 81 tables / 1518 rows · verify 6/6 · drill 7/7 · RTO ≈ 1.7 s |
+
+> The backup run/verify/drill from the previous session referred to tenant ids `01a141ee-…`; the
+> rebuilt database has new ids. Both runs are real, and neither is presented as a re-quote of the
+> other. `docs/RELEASE_READINESS.md` §8 records this rebuild as the end-to-end proof of the
+> onboarding path.
+
 ### Exact next step (Phase 10, continued)
 
 1. Screen-by-screen RTL/bilingual + AA (contrast, focus order, keyboard) + colour-independence

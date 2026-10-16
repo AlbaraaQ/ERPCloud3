@@ -21,7 +21,7 @@ to ZATCA, or any multi-tenant hosting of real customer books.
 | Gate | Command | Result |
 |---|---|---|
 | Types | `npm run typecheck` | ✅ exit 0, 0 errors |
-| Test suite | `set -a && . ./.env && set +a && npm test` | ✅ **21 files / 184 passed / 8 skipped / 0 failed** |
+| Test suite | `set -a && . ./.env && set +a && npm test` | ✅ **22 files / 192 passed / 8 skipped / 0 failed** |
 | Production build | `npm run build` | ✅ "Compiled successfully in 13.2s", all routes emitted |
 | End-to-end HTTP sweep | `npm run acceptance:sweep -- --soak=20` | ✅ **ACCEPTANCE SWEEP PASSED — 39/39 checks** |
 | Backup + verification | `npm run backup:run && npm run backup:verify` | ✅ `status verified`, 6/6 checks |
@@ -41,7 +41,7 @@ cannot serve; they are skipped with a documented reason and are **never reported
 | Tenant screens | 18 | `/dashboard`, `/accounting`, `/inventory`, `/sales`, `/purchasing`, `/cash`, `/pos`, `/manufacturing`, `/settlement`, `/tax`, `/reports`, `/assistant`, `/assistant/settings` and the five van-sales screens all render with a tenant session |
 | Console screens | 9 | `/platform` dashboard, tenants, plans, flags, alerts, backups, exports, audit and one tenant detail page render with a platform session |
 | Session-namespace isolation | 7 | a **tenant** cookie cannot open `/platform*` (307) and a **platform** cookie cannot open `/dashboard`, `/assistant`, `/reports` (307); anonymous cannot open `/assistant` |
-| Soak smoke | 2 | 20 warm sequential hits over `/dashboard`, `/reports`, `/assistant`: 0 failures, mean 315 ms / p50 195 ms / p95 622 ms |
+| Soak smoke | 2 | 20 warm sequential hits over `/dashboard`, `/reports`, `/assistant`: 0 failures. Run 1 (pre-rebuild, cold-ish): mean 315 ms / p50 195 ms / p95 622 ms; run 2 (after the environment rebuild, §8): mean 192 ms / p50 186 ms / p95 406 ms |
 
 > **Scope of that last row:** it is a *smoke*, not capacity evidence. It ran against the dev server
 > (Turbopack) on a database engine that serializes every logical connection. No load, soak,
@@ -111,6 +111,7 @@ here (no client binaries), so `backup_runs.format = logical-json`; remote transp
 | 3 | A read-only tenant would have been reported as "0 conversations expired" by the retention sweep | `modules/ai/retention.ts` | now skipped *before* the sweep with `skippedReason: errors.tenantReadOnly` |
 | 4 | The first acceptance sweep script failed itself: it minted a tenant session without `sessions.tenant_id` (every screen 307'd), and its error detector matched Next's embedded 404-template text inside the RSC payload | `scripts/acceptance-sweep.mts` | both fixed; the sweep now passes 39/39 and a failed request is reported as a check, never thrown |
 | 5 | (environmental, not a defect) one sweep run stalled for minutes on a single route and the dev server was reaped mid-run | dev engine under sustained sequential load | re-run clean; soak numbers are reported as smoke only |
+| 6 | The operations guide instructed `cp .env.example .env`, but **`.env.example` did not exist** — the very first onboarding step an operator would run was impossible | `docs/OPERATIONS_GUIDE.md` vs repository root | template written (documented, secret-free, `.gitignore` negated for it) **and** locked by `tests/unit/env-example.test.ts` (8 assertions: every variable read by `src/`/`scripts/` is declared, every variable in the guide's table is declared, no secret is filled in, live-restore stays off by default). Mutation-verified twice: removing `PG_POOL_MAX` and filling `HISAB_ENCRYPTION_KEY` each failed the suite. The template then performed the rebuild it documents (§8). |
 
 No defect was closed by weakening a test or by loosening a validator.
 
@@ -122,3 +123,24 @@ No defect was closed by weakening a test or by loosening a validator.
 | Product owner | — | pending | |
 | Security reviewer | — | pending | |
 | Tax/legal (ZATCA) | — | pending (OQ-2/3/4) | |
+
+## 8. Continuation: the environment was rebuilt from the template (same day)
+
+The sandbox restarted between work sessions. `node_modules/`, the embedded database directory
+`.pglite/` and the gitignored `.env` are **not** part of the workspace snapshot, so a reboot is
+expected to lose them — and it did. The recovery used the documented path rather than an ad-hoc
+one, which turned the incident into the strongest possible test of the onboarding instructions:
+
+| Step | Command | Result |
+|---|---|---|
+| dependencies | `npm install --no-audit --no-fund` | 480 packages |
+| environment | `cp .env.example .env`, then filled `HISAB_ENCRYPTION_KEY` with the guide's own generator command plus the two seed passwords and the assistant placeholder | 9 active variables, no secret invented |
+| database engine | `node scripts/dev-postgres.mjs --dir .pglite` | PostgreSQL 18.6 (PGlite) on 127.0.0.1:5432 |
+| schema + policies + seed | `node scripts/db-reset.mjs` | 52 permission codes, platform owner created, both demo tenants seeded (new ids: tenant A `01a1422b-a19c-…`) |
+| gates | `npm run typecheck` · `npm test` | clean · **22 files / 192 passed / 8 skipped / 0 failed** |
+| acceptance | `npm run acceptance:sweep -- --soak=20` | **39/39 checks passed**, soak mean 192 ms / p95 406 ms |
+| data safety | `npm run backup:run` · `verify` · `drill` | artifact sha `fbfbb66cd0da63d7…`, 81 tables / 1518 rows, verify 6/6, drill 7/7 invariants, RTO ≈ 1.7 s |
+
+Everything above ran against the database created by the template's own instructions, with a key
+generated by the command printed inside it. The guide is therefore not a description of a working
+system — it is the procedure that produced one, executed end to end.

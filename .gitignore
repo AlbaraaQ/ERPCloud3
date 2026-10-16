@@ -9,3 +9,6 @@ coverage/
 *.enc
 # tenant export bundles (data, never source)
 .exports/
+
+# but the environment TEMPLATE is tracked: it documents the variables and holds no secret
+!.env.example

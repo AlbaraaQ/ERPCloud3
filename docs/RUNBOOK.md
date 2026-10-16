@@ -22,7 +22,7 @@ breaks. Policy background: `docs/BACKUP_AND_RECOVERY.md`, `docs/PLATFORM_ADMIN.m
 | Application | Next.js 16 (App Router) — `npm run build` → `.next/` | one process, `npm start` (default port 3000) |
 | Database | PostgreSQL 15+ reachable through `DATABASE_URL` | schema applied by `drizzle-kit push` + `src/db/rls.sql` (RLS policies) |
 | Job worker | same codebase, `ENABLE_WORKER=true` | pg-boss queues: `heartbeat`, `zatca-submission`, `backup-run`, `backup-verify`, `backup-drill`, `backup-prune`, `platform-maintenance` |
-| Secrets | environment only (`.env` or the platform's secret store) | `DATABASE_URL`, `HISAB_ENCRYPTION_KEY` (ZATCA private keys are encrypted with it), provider keys referenced by **name** |
+| Secrets | environment only — start from the tracked template `cp .env.example .env`, then fill the empty lines (`.env` itself is gitignored) | `DATABASE_URL`, `HISAB_ENCRYPTION_KEY` (ZATCA private keys and backup artifacts are encrypted with it), provider keys referenced by **name** |
 | Backups | `.backups/*.enc` locally + remote transport | remote is `local-contract` in this build — **not** an off-site provider |
 | Console | `/platform` inside the same process | separate session namespace (`hisab_platform_session`) |
 
