@@ -41,17 +41,27 @@ polished light and dark mode.
 | 16 | [IMPLEMENTATION_ROADMAP.md](./IMPLEMENTATION_ROADMAP.md) | Phases 0–10, dependencies, exit criteria, current pointer |
 | 17 | [DECISIONS.md](./DECISIONS.md) | ADR-style decisions (D-###), assumptions (A-#), open questions (OQ-#) |
 | 18 | [PROGRESS.md](./PROGRESS.md) | Session-by-session implementation status — **read this first** |
+| 19 | [OPERATIONS_GUIDE.md](./OPERATIONS_GUIDE.md) | **دليل التشغيل والاستخدام (بالعربية)** — how to run the system and use every module, day to day |
+| 20 | [RUNBOOK.md](./RUNBOOK.md) | Operator runbook: deploy, rollback, routine jobs, alert semantics, incident playbooks |
+| 21 | [RELEASE_READINESS.md](./RELEASE_READINESS.md) | Phase 10 evidence-based release report: gates, coverage, blockers, verdict |
 
 ---
 
 ## Current phase
 
-**Phase 6 — Electronic invoicing & tax compliance: CORE CORE ✅ / PARTIAL** (signed
-UBL XML, ICV+PIH chain, TLV QR with real secp256k1 signatures, submission engine +
-status machine, offline legal block for standard docs, `/tax` UI — **sandbox-validated
-architecture only; NOT production-certified; FATOORA portal CSR automation and legal
-questions OQ-2/3/4 remain open gating items** — evidence in `PROGRESS.md`).
-Next: **Phase 7 — Reporting & business dashboards** (see `IMPLEMENTATION_ROADMAP.md`).
+**Phase 10 — UX completion, hardening & release readiness (in progress)** on top of
+Phases 0–9 ✅ complete: accounting/inventory/sales/purchasing/cash/van-sales/manufacturing,
+reporting (R-01…R-66 catalog), ZATCA Phase-2 flow (sandbox-validated architecture only —
+AC-025, **not** production-certified, OQ-2/3/4 open), platform administration + backups,
+and the AI assistant with its retention and metering.
+
+Phase 10 evidence so far: `npm test` **21 files / 184 passed / 8 skipped / 0 failed**,
+`tsc` clean, `next build` ok, `npm run acceptance:sweep -- --soak=20` **39/39 checks
+passed** (every screen + session-namespace isolation + smoke), a fresh
+backup → verify → restore drill, and a structural guard suite that fails the build if a
+screen loses its server-side guard. Read the verdict and the ranked blockers in
+[RELEASE_READINESS.md](./RELEASE_READINESS.md); operators start at
+[OPERATIONS_GUIDE.md](./OPERATIONS_GUIDE.md) (Arabic) and [RUNBOOK.md](./RUNBOOK.md).
 
 ## How to resume work (session protocol)
 

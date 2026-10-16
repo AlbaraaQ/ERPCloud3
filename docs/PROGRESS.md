@@ -80,13 +80,55 @@ exactly as observed.
 5. Retention applies to `ai_conversations` only, by design (audit tables, tickets and the
    platform chain are out of its scope and are proven to survive).
 
-### Exact next step (Phase 10 — UX completion, hardening & release readiness)
+### Phase 10 started (same session, after the commit above)
 
-1. RTL/bilingual + accessibility + status-semantics sweep over the remaining screens.
-2. Re-run the full acceptance list of `TESTING_AND_ACCEPTANCE.md`; re-drill the restore.
-3. Deployment & rollback runbook + operational runbooks; release-readiness report with evidence.
-4. **Deliverable requested by the user:** `docs/OPERATIONS_GUIDE.md` — how to run and use the
-   system (Arabic).
+**Added**
+
+- `tests/unit/ui-guards.test.ts` — 11 structural assertions that fail the suite if the app's
+  security *shape* changes: every page is behind a session/platform guard (its own or an enclosing
+  layout's), every console page resolves a platform context, the console has exactly one layout
+  door, every permission named at a guard site exists in the right catalogue, tenant navigation
+  uses real tenant codes only, the ops role holds **no** destructive code, an unknown role gets an
+  empty set, and only four named non-platform files may import platform services. Verified to have
+  teeth by mutation: renaming a nav code and adding an unguarded top-level page each failed the
+  suite, and both were reverted.
+- `scripts/acceptance-sweep.mts` (+ `npm run acceptance:sweep`) — the HTTP acceptance sweep: mints
+  a tenant and a platform session, walks 30 screens (3 public / 18 tenant / 9 console) asserting
+  200 + RTL shell + no framework error document, proves the two session namespaces cannot open each
+  other's screens, and runs an optional warm soak. **Passed 39/39**, soak 20 requests / 0 failures
+  (mean 315 ms, p50 195 ms, p95 622 ms).
+- `docs/OPERATIONS_GUIDE.md` — the bilingual deliverable the user asked for (Arabic): run and use
+  the system, module by module, with the platform console, operations, troubleshooting and the
+  honest limits of this build.
+- `docs/RUNBOOK.md` — deploy order, rollback (app vs data), routine cadences, alert semantics and
+  six incident playbooks.
+- `docs/RELEASE_READINESS.md` — the Phase 10 verdict with the evidence table, item-by-item status
+  and the ranked blockers.
+
+**Re-drilled (fresh evidence, not a re-quote)**
+
+| Command | Result |
+|---------|--------|
+| `npm run typecheck` | ✓ 0 errors |
+| `set -a && . ./.env && set +a && npm test` | ✓ **21 files / 184 passed / 8 skipped / 0 failed** |
+| `npm run build` | ✓ compiled successfully (13.2 s), all routes emitted |
+| `npm run acceptance:sweep -- --soak=20` | ✓ **ACCEPTANCE SWEEP PASSED — 39/39 checks** |
+| `npm run backup:run` | ✓ 81 tables / 6737 rows · artifact sha `cd07baed…` · remote `local-contract` verified |
+| `npm run backup:verify` | ✓ `verified` — 6/6 checks (incl. 149 FKs inside the snapshot) |
+| `npm run backup:drill` | ✓ `passed` — 7/7 invariants · `restore_drill_mva88f67` · RTO ≈ 1.6 s |
+| live `/assistant` + `/assistant/settings` (minted session) | 200, RTL shell, all Arabic markers |
+| live question with the placeholder key | the honest answer `errors.aiUnavailable` («المساعد غير متاح حالياً…») and **no fabricated figure**; the failed turn is still recorded and metered |
+
+**Verdict recorded:** **not production-ready**, for reasons that are environmental/processual
+(migrations, off-site backup transport, a real ZATCA credential cycle, open OQ-2/3/4, browser-driven
+E2E and AA coverage, deployment automation) rather than unfinished product features — see
+`RELEASE_READINESS.md` §5.
+
+### Exact next step (Phase 10, continued)
+
+1. Screen-by-screen RTL/bilingual + AA (contrast, focus order, keyboard) + colour-independence
+   audit; add browser-driven E2E once a runner is available.
+2. Close the ranked blockers in `RELEASE_READINESS.md` §5 for a production go-live.
 
 ---
 

@@ -5,7 +5,7 @@ not verified working and tested. Every phase ends with: tests executed, docs upd
 `docs/PROGRESS.md` appended, and the full validation gate
 (`next typegen` → `tsc --noEmit` → `next build` → platform `build_and_start`) passing.
 
-**Current pointer:** Phases 0–8 ✅ complete (AC-025 environment-limited; Phase 8 residuals in `PROGRESS.md` Session 10) · **Phase 9 implemented** — `/assistant` chat over a permission-gated read-only tool registry, approval tickets executed by a human through the normal services, injection guardrails, full conversation/tool audit; residuals in `PROGRESS.md` Session 11 → **Phase 10 (UX completion, hardening & release readiness) next**.
+**Current pointer:** Phases 0–9 ✅ complete (AC-025 environment-limited; Phase 9 residuals — retention purge and usage metering — closed in Session 12) · **Phase 10 in progress**: RTL/bilingual + accessibility work started (assistant screens carry live-region/status semantics), a structural guard suite (`tests/unit/ui-guards.test.ts`) and an HTTP acceptance sweep (`npm run acceptance:sweep`) were added, the backup chain was re-drilled, and the operational documentation (`OPERATIONS_GUIDE.md`, `RUNBOOK.md`, `RELEASE_READINESS.md`) is written. **Still open in Phase 10:** screen-by-screen RTL/AA/colour-independence audit, browser-driven E2E, and every blocker ranked in `RELEASE_READINESS.md` §5.
 
 ---
 
@@ -147,6 +147,11 @@ cost/billing computation.
 RTL/bilingual sweep, accessibility audit (AA), status-semantics audit (never color-only), load/soak smoke, security review (authZ matrix re-verified), backup restore re-drill, full E2E acceptance run of TESTING_AND_ACCEPTANCE.md AC list, deployment & rollback runbook, operational runbooks, release-readiness report with evidence.
 
 **Exit:** evidence-based release-readiness report; all OQ staffing/legal inputs resolved or explicitly scoped out.
+
+**Status (Session 12):** the report exists (`RELEASE_READINESS.md`) and its verdict is **not
+production-ready** — the blockers are migrations, off-site backup transport, a real ZATCA
+credential cycle, the open OQ inputs, browser-driven E2E/AA coverage and deployment automation.
+That verdict is the honest output of this phase, not a failure to finish it.
 
 ---
 
